@@ -3,7 +3,7 @@ import {
   Search, Calculator, BookOpen, Calendar, Award, AlertCircle, Clock, Info, Home, 
   ChevronRight, Bot, Sparkles, FileText, Loader2, Send, Menu, Key, Check, Timer, 
   ExternalLink, Download, Upload, FileSearch, Trash2, Shield, Euro, Briefcase, 
-  Users, Gift, BookType, PenTool, Settings, Play, Radio, PieChart, 
+  Users, Gift, BookType, PenTool, Settings, Play, Radio, 
   Moon, Sun, User, LayoutGrid, Phone, Mail, HelpCircle, Smartphone, Printer, Globe,
   Mic, MicOff, Volume2, VolumeX, Command, MessageSquare, Landmark, Bell, Heart, MapPin, X, Plus
 } from 'lucide-react';
@@ -97,7 +97,7 @@ const parseVoiceCommandWithGemini = async (userVoiceText, customApiKey, categori
 Tu trabajo es interpretar lo que ha dicho el trabajador por micrófono y determinar qué acciones realizar en la aplicación web para el AÑO VIGENTE 2026.
 Debes devolver UNICAMENTE un objeto JSON válido sin etiquetas de markdown adicionales, con la siguiente estructura exacta:
 {
-  "targetTab": "inicio | perfil | cuadrante | calculadoras | pagas | irpf | auditoria | traductor | redactor | asistente | portal | permisos | antiguedad | buscador | videos | estadisticas | afiliacion",
+  "targetTab": "inicio | perfil | cuadrante | calculadoras | pagas | irpf | auditoria | traductor | redactor | asistente | portal | permisos | antiguedad | buscador | videos | jubilacion | afiliacion",
   "targetCalcSubTab": "diferencias | horas_extras",
   "categoriaBase": "string exacta coincidente con las disponibles o null",
   "categoriaSuperior": "string exacta coincidente con las disponibles o null",
@@ -232,24 +232,6 @@ const conceptosSociales = {
   ]
 };
 
-const useEstadisticasLocales = () => {
-  const [estadisticas, setEstadisticas] = useState(() => {
-    const saved = localStorage.getItem('cgt_estadisticas_uso');
-    return saved ? JSON.parse(saved) : { totalClicks: 0, secciones: {} };
-  });
-
-  const registrarVisita = useCallback((seccion) => {
-    setEstadisticas(prev => {
-      const newStats = { ...prev };
-      newStats.totalClicks += 1;
-      newStats.secciones[seccion] = (newStats.secciones[seccion] || 0) + 1;
-      localStorage.setItem('cgt_estadisticas_uso', JSON.stringify(newStats));
-      return newStats;
-    });
-  }, []);
-  return { estadisticas, registrarVisita };
-};
-
 const calcularDiferenciaDiaria = (categoriaPropia, categoriaSuperior, bivolante = false, porter = false) => {
   const dSup = tablaSalarial2026[categoriaSuperior];
   const dProp = tablaSalarial2026[categoriaPropia];
@@ -339,7 +321,316 @@ const BotonAccesoRapido = memo(function BotonAccesoRapido({ icon, color, titulo,
   );
 });
 
-const PantallaInicio = memo(function PantallaInicio({ setActiveTab, apiKey }) {
+const SimuladorJubilacion = memo(({ perfil, apiKey, onConfigureIA }) => {
+  // Calculamos los años de ingreso iniciales basados en el perfil si existen
+  const calcularAntiguedadInicial = () => {
+    if (!perfil?.fechaIngreso) return 25;
+    const ingreso = new Date(perfil.fechaIngreso);
+    const hoy = new Date();
+    let a = hoy.getFullYear() - ingreso.getFullYear();
+    if (hoy.getMonth() < ingreso.getMonth() || (hoy.getMonth() === ingreso.getMonth() && hoy.getDate() < ingreso.getDate())) a--;
+    return Math.max(0, a);
+  };
+
+  const [baseReguladora, setBaseReguladora] = useState(1800);
+  const [edad, setEdad] = useState("65");
+  const [anosEmpresa, setAnosEmpresa] = useState(calcularAntiguedadInicial);
+
+  // Estados para el Escáner de Nómina IA
+  const [archivoNomina, setArchivoNomina] = useState(null);
+  const [isScanning, setIsScanning] = useState(false);
+  const [scanSuccess, setScanSuccess] = useState('');
+  const [errorScan, setErrorScan] = useState('');
+
+  const penalizaciones = {
+    "66": 0.00,
+    "65": 0.00,
+    "64.5": 3.82,
+    "64": 5.25,
+    "63.5": 8.40,
+    "63": 19.00
+  };
+
+  const premiosConvenio = {
+    "66": 0,
+    "65": 0,
+    "64.5": 215.37,
+    "64": 323.06,
+    "63.5": 430.75,
+    "63": 592.28
+  };
+
+  const importeAno = premiosConvenio[edad] || 0;
+  const penalizacionPorcentaje = penalizaciones[edad] || 0;
+  const dineroRestado = baseReguladora * (penalizacionPorcentaje / 100);
+  const pensionFinal = baseReguladora - dineroRestado;
+  const premioTotal = anosEmpresa * importeAno;
+
+  const handleFileChange = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        setArchivoNomina({
+          data: reader.result.split(',')[1],
+          mimeType: file.type,
+          name: file.name
+        });
+        setScanSuccess('');
+        setErrorScan('');
+      };
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const ejecutarEscaneoNomina = async () => {
+    if (!apiKey) {
+      onConfigureIA?.();
+      return;
+    }
+    if (!archivoNomina) return;
+    setIsScanning(true);
+    setErrorScan('');
+    setScanSuccess('');
+
+    const prompt = `Analiza la imagen o PDF de esta nómina de FCC Medio Ambiente para ayudar al trabajador a simular su jubilación.
+Tu objetivo es extraer 2 datos clave de la nómina:
+1. "baseEstimada": Localiza la Base de Cotización por Contingencias Comunes (B.C.C.C.), Base IRPF o Total Devengado de la nómina (el valor mensual bruto de cotización para calcular su pensión, en euros, como número decimal, ej: 1845.50).
+2. "anosEmpresa": Los años de antigüedad en la empresa si aparece la fecha de ingreso o antigüedad en la nómina (calculados respecto al año 2026, como número entero, ej: 24). Si no aparece ninguna fecha o año de antigüedad, devuelve null.
+3. "resumen": Breve frase de 1 línea indicando exactamente qué datos has localizado (ej: "Leída Base de Contingencias Comunes de 1.845,50 € y 24 años de antigüedad en FCC").
+
+Responde ÚNICAMENTE con un objeto JSON sin bloques de código ni texto adicional con esta estructura exacta:
+{
+  "baseEstimada": 1845.50,
+  "anosEmpresa": 24,
+  "resumen": "Localizada Base de Cotización de 1.845,50 € y 24 años de antigüedad."
+}`;
+
+    try {
+      const res = await callGeminiAPI(prompt, apiKey, [archivoNomina]);
+      const cleanText = res.replace(/```json/gi, '').replace(/```/g, '').trim();
+      const match = cleanText.match(/\{[\s\S]*\}/);
+      if (match) {
+        const data = JSON.parse(match[0]);
+        if (data.baseEstimada && !isNaN(Number(data.baseEstimada))) {
+          setBaseReguladora(Math.round(Number(data.baseEstimada) * 100) / 100);
+        }
+        if (data.anosEmpresa && !isNaN(Number(data.anosEmpresa))) {
+          setAnosEmpresa(Number(data.anosEmpresa));
+        }
+        setScanSuccess(data.resumen || "¡Datos de nómina extraídos y aplicados con éxito!");
+      } else {
+        setErrorScan("No se pudieron detectar las cifras automáticamente. Puedes introducirlas o ajustarlas manualmente abajo.");
+      }
+    } catch (err) {
+      setErrorScan("Hubo una incidencia al analizar el archivo. Introduce los datos manualmente en los campos inferiores.");
+    } finally {
+      setIsScanning(false);
+    }
+  };
+
+  return (
+    <div className="animate-fadeIn space-y-6 w-full print-area">
+      <div className="bg-white p-6 md:p-8 rounded-2xl shadow-sm border border-gray-100">
+        <h2 className="text-xl md:text-2xl font-black border-b border-gray-100 pb-4 mb-6 flex items-center text-red-700">
+          <Award className="mr-3 w-8 h-8 shrink-0 animate-pulse" /> Simulador de Jubilación 2026
+          <span className="ml-3 bg-red-600 text-white text-[10px] px-2 py-1 rounded-full uppercase tracking-widest font-black animate-pulse">¡Nueva Sección!</span>
+        </h2>
+
+        <div className="bg-yellow-50 text-yellow-800 text-xs font-bold py-3 px-4 rounded-xl mb-6 flex items-start gap-2 border border-yellow-200">
+          <Info className="w-5 h-5 shrink-0" />
+          <span>Cálculos basados en la legislación de la Seguridad Social para 2026 y premio del Convenio de FCC (Anexo IV Art. 41). Revisar anualmente.</span>
+        </div>
+
+        {/* TARJETA ASISTENTE IA: ESCANEAR NÓMINA (OPCIONAL) */}
+        <div className="bg-gradient-to-br from-purple-50 via-indigo-50 to-blue-50 border-2 border-purple-200 rounded-2xl p-5 md:p-6 mb-8 shadow-sm no-print">
+          <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-purple-200 pb-3 mb-4">
+            <h3 className="text-base font-black text-purple-900 flex items-center gap-2">
+              <Sparkles className="w-5 h-5 text-purple-600 animate-pulse" />
+              ¿Tienes tu nómina a mano? Escanéala con IA (Opcional)
+            </h3>
+            <span className="bg-purple-600 text-white text-[10px] px-2.5 py-1 rounded-full uppercase tracking-wider font-extrabold">Autocompletado Mágico</span>
+          </div>
+
+          <p className="text-xs md:text-sm text-purple-950 font-medium leading-relaxed mb-3">
+            Sube una <strong>foto o PDF de tu nómina más reciente</strong> de FCC. La Inteligencia Artificial localizará automáticamente tu <strong>Base de Cotización</strong> y tus <strong>años en la empresa</strong> para que no tengas que buscar ningún número.
+          </p>
+
+          <div className="bg-amber-100/70 border border-amber-300 text-amber-900 text-[11px] p-3 rounded-xl mb-4 flex items-start gap-2 font-medium">
+            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+            <span><strong>Aviso orientativo:</strong> La IA tomará la base mensual de tu nómina actual como cálculo orientativo. La pensión oficial definitiva la calcula la Seguridad Social sumando y promediando las bases de cotización de tus últimos 25 años (300 bases).</span>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+            <div className="md:col-span-7">
+              <div className="border-2 border-dashed border-purple-300 hover:border-purple-500 bg-white/80 rounded-xl p-4 flex flex-col items-center justify-center text-center relative cursor-pointer transition">
+                <input 
+                  type="file" 
+                  accept="image/*,application/pdf" 
+                  onChange={handleFileChange} 
+                  className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" 
+                  title="Sube tu nómina en foto o PDF" 
+                />
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-purple-100 text-purple-700 rounded-xl">
+                    <Upload className="w-6 h-6" />
+                  </div>
+                  <div className="text-left">
+                    <p className="font-bold text-xs md:text-sm text-gray-800">
+                      {archivoNomina ? archivoNomina.name : 'Pulsa aquí para subir tu nómina (Foto o PDF)'}
+                    </p>
+                    <p className="text-[10px] text-gray-500 font-semibold">Formatos JPG, PNG o PDF de cualquier tamaño</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="md:col-span-5 flex flex-col gap-2">
+              <button 
+                onClick={ejecutarEscaneoNomina} 
+                disabled={isScanning || !archivoNomina}
+                className={`w-full py-3.5 px-4 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 text-white ${
+                  isScanning 
+                    ? 'bg-purple-400 cursor-not-allowed' 
+                    : !apiKey 
+                      ? 'bg-amber-600 hover:bg-amber-700 animate-pulse' 
+                      : !archivoNomina 
+                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
+                        : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700'
+                }`}
+              >
+                {isScanning ? (
+                  <><Loader2 className="w-4 h-4 animate-spin" /> Analizando Nómina...</>
+                ) : !apiKey ? (
+                  <><Key className="w-4 h-4" /> Configurar Clave IA</>
+                ) : (
+                  <><Sparkles className="w-4 h-4" /> Rellenar Datos con IA</>
+                )}
+              </button>
+
+              {archivoNomina && (
+                <button 
+                  onClick={() => { setArchivoNomina(null); setScanSuccess(''); setErrorScan(''); }}
+                  className="text-[11px] text-red-600 hover:text-red-800 font-bold text-center underline"
+                >
+                  Quitar archivo seleccionado
+                </button>
+              )}
+            </div>
+          </div>
+
+          {scanSuccess && (
+            <div className="mt-4 p-3.5 bg-green-100 border border-green-300 text-green-900 rounded-xl text-xs font-bold flex items-center gap-2 animate-fadeIn">
+              <Check className="w-5 h-5 text-green-700 shrink-0" />
+              <span>{scanSuccess} <em>(Revisa y ajusta los valores abajo si lo necesitas)</em>.</span>
+            </div>
+          )}
+
+          {errorScan && (
+            <div className="mt-4 p-3.5 bg-red-100 border border-red-300 text-red-900 rounded-xl text-xs font-bold flex items-center gap-2 animate-fadeIn">
+              <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
+              <span>{errorScan}</span>
+            </div>
+          )}
+        </div>
+
+        {/* PARTE MANUAL: DATOS Y CÁLCULO EN TIEMPO REAL */}
+        <div className="flex items-center gap-2 border-b border-gray-200 pb-2 mb-6">
+          <Calculator className="w-5 h-5 text-red-600" />
+          <h3 className="font-black text-gray-800 text-sm uppercase tracking-wide">
+            O introduce / ajusta tus datos manualmente:
+          </h3>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+          <div className="space-y-5 bg-gray-50 p-6 rounded-xl border border-gray-200">
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide flex justify-between">
+                <span>Base Reguladora Estimada (€/mes)</span>
+                {scanSuccess && <span className="text-purple-700 font-extrabold text-[10px] bg-purple-100 px-2 py-0.5 rounded">Autocompletado con IA</span>}
+              </label>
+              <input 
+                type="number" 
+                step="0.01" 
+                value={baseReguladora} 
+                onChange={e => setBaseReguladora(Number(e.target.value))} 
+                className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-lg text-gray-800 focus:ring-2 focus:ring-red-500 outline-none shadow-sm" 
+              />
+              <p className="text-[10px] text-gray-500 mt-1">Suele coincidir de forma orientativa con tu Base de Contingencias Comunes.</p>
+            </div>
+
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Edad a la que te quieres jubilar</label>
+              <select 
+                value={edad} 
+                onChange={e => setEdad(e.target.value)} 
+                className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-gray-800 focus:ring-2 focus:ring-red-500 outline-none shadow-sm"
+              >
+                <option value="66">66 años (Ordinaria / Demorada - 0€ premio)</option>
+                <option value="65">65 años (Ordinaria - 0% penalización - 0€ premio)</option>
+                <option value="64.5">64 años y 6 meses (Adelanto 6 meses - 215,37 €/año)</option>
+                <option value="64">64 años (Adelanto 12 meses - 323,06 €/año)</option>
+                <option value="63.5">63 años y 6 meses (Adelanto 18 meses - 430,75 €/año)</option>
+                <option value="63">63 años (Adelanto 24 meses - 592,28 €/año)</option>
+              </select>
+              <p className="text-[10px] text-gray-500 mt-1">*Ejemplo de coeficientes reductores oficiales para trabajadores con más de 38,5 años cotizados.</p>
+            </div>
+
+            <div className="pt-4 border-t border-gray-200">
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide flex justify-between">
+                <span>Años trabajados en FCC (Premio Art. 41)</span>
+                {scanSuccess && <span className="text-purple-700 font-extrabold text-[10px] bg-purple-100 px-2 py-0.5 rounded">Autocompletado con IA</span>}
+              </label>
+              <input 
+                type="number" 
+                min="0" 
+                value={anosEmpresa} 
+                onChange={e => setAnosEmpresa(Number(e.target.value))} 
+                className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-lg text-gray-800 focus:ring-2 focus:ring-red-500 outline-none shadow-sm" 
+              />
+              <p className="text-[10px] text-gray-500 mt-1">Años de servicio acreditados en la contrata de FCC Valencia Zona Norte.</p>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-4">
+            <div className="bg-white rounded-2xl p-6 shadow-md border border-gray-200 flex-1 flex flex-col justify-center">
+              <p className="text-sm font-bold text-gray-500 mb-2 uppercase tracking-wider">Pensión Mensual Estimada</p>
+              <div className="text-4xl lg:text-5xl font-black text-gray-900 mb-4">
+                {pensionFinal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-2xl text-gray-400">€</span>
+              </div>
+              {penalizacionPorcentaje > 0 ? (
+                <div className="bg-red-50 text-red-700 text-xs font-bold p-3 rounded-lg border border-red-200 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  Penalización del {penalizacionPorcentaje}% (-{dineroRestado.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}€/mes)
+                </div>
+              ) : (
+                <div className="bg-green-50 text-green-700 text-xs font-bold p-3 rounded-lg border border-green-200 flex items-center gap-2">
+                  <Check className="w-4 h-4 shrink-0" />
+                  Cobras el 100% (Sin recortes por adelanto)
+                </div>
+              )}
+            </div>
+
+            <div className="bg-gradient-to-br from-gray-900 to-black rounded-2xl p-6 shadow-xl border border-gray-800 text-white flex-1 flex flex-col justify-center no-invert">
+              <div className="flex justify-between items-start mb-2">
+                <p className="text-sm font-bold text-red-400 uppercase tracking-wider">Premio Jubilación FCC</p>
+                <Gift className="w-6 h-6 text-red-500 opacity-50" />
+              </div>
+              <div className="text-4xl lg:text-5xl font-black mb-2">
+                {premioTotal.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-2xl text-gray-500">€</span>
+              </div>
+              <p className="text-[10px] text-gray-400 bg-gray-800/50 p-2 rounded-lg border border-gray-700">
+                Pago único en liquidación. Tramo aplicado: {importeAno.toFixed(2)} €/año según Art. 41 del Convenio FCC.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
+const PantallaInicio = memo(function PantallaInicio({ setActiveTab, setActiveCalcSubTab, apiKey }) {
   const [currentImageIndex, setCurrentImageIndex] = useState(0);
   const images = ['/5.png', '/6.png', '/Imagen1.jpg', '/Imagen2.jpg'];
 
@@ -404,8 +695,8 @@ const PantallaInicio = memo(function PantallaInicio({ setActiveTab, apiKey }) {
       <div className="w-full mt-6">
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4 w-full">
           <BotonAccesoRapido icon={<Calculator className="w-6 h-6 md:w-8 md:h-8"/>} color="red" titulo="Diferencias" subtitulo="Categoría superior" onClick={() => { setActiveTab('calculadoras'); setActiveCalcSubTab('diferencias'); }} />
+          <BotonAccesoRapido icon={<Award className="w-6 h-6 md:w-8 md:h-8 text-red-600 animate-pulse"/>} color="red" titulo="Jubilación" subtitulo="Simulador 2026" onClick={() => setActiveTab('jubilacion')} />
           <BotonAccesoRapido icon={<Euro className="w-6 h-6 md:w-8 md:h-8 text-green-700"/>} color="green" titulo="Pagas y Pluses" subtitulo="Pagas extras anuales" onClick={() => setActiveTab('pagas')} />
-          <BotonAccesoRapido icon={<ExternalLink className="w-6 h-6 md:w-8 md:h-8 text-blue-600"/>} color="blue" titulo="Portal Empleado" subtitulo="Tus nóminas" onClick={() => setActiveTab('portal')} />
           <BotonAccesoRapido icon={<Calendar className="w-6 h-6 md:w-8 md:h-8"/>} color="green" titulo="Antigüedad" subtitulo="Cálculos y premios" onClick={() => setActiveTab('antiguedad')} />
           <BotonAccesoRapido icon={<PenTool className="w-6 h-6 md:w-8 md:h-8 text-purple-600"/>} color="purple" titulo="Redactor" subtitulo="Peticiones RRHH" onClick={() => setActiveTab('redactor')} />
           <BotonAccesoRapido icon={<FileSearch className="w-6 h-6 md:w-8 md:h-8 text-purple-600 animate-pulse"/>} color="purple" titulo="Auditar Nómina 2026" subtitulo="Análisis por IA" onClick={() => setActiveTab('auditoria')} />
@@ -1514,11 +1805,387 @@ const PortalEmpleado = memo(() => {
   );
 });
 
+const AfiliateCGT = memo(function AfiliateCGT() {
+  const [enviado, setEnviado] = useState(false);
+  const [copiado, setCopiado] = useState(false);
+  
+  const [datosForm, setDatosForm] = useState({
+    nombre: '', apellido1: '', apellido2: '',
+    direccion: '', numero: '', piso: '', cp: '', poblacion: '', provincia: '',
+    dni: '', fechaNac: '', email: '', telFijo: '', telMovil: '',
+    empresa: 'FCC Medio Ambiente', situacionLaboral: '', jornadaLaboral: '', centroTrabajo: 'Valencia Zona Norte',
+    iban: '', observaciones: '', privacidad: false, comunicaciones: false
+  });
+
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setDatosForm(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
+  };
+
+  const textoResumen = `SOLICITUD DE AFILIACIÓN Y DOMICILIACIÓN DE CUOTAS - CGT
+--------------------------------------------------
+[1] DATOS PERSONALES:
+Nombre completo: ${datosForm.nombre} ${datosForm.apellido1} ${datosForm.apellido2}
+DNI/NIE: ${datosForm.dni} | Fecha de Nacimiento: ${datosForm.fechaNac}
+Dirección: ${datosForm.direccion}, Nº: ${datosForm.numero}, Piso/Pta: ${datosForm.piso}
+Código Postal: ${datosForm.cp} - ${datosForm.poblacion} (${datosForm.provincia})
+
+[2] CONTACTO:
+Teléfono Móvil: ${datosForm.telMovil} | Teléfono Fijo: ${datosForm.telFijo}
+E-mail: ${datosForm.email}
+
+[3] DATOS LABORALES:
+Empresa: ${datosForm.empresa}
+Centro de Trabajo: ${datosForm.centroTrabajo}
+Situación Laboral: ${datosForm.situacionLaboral}
+Jornada Laboral: ${datosForm.jornadaLaboral}
+
+[4] DATOS BANCARIOS (IBAN):
+IBAN: ${datosForm.iban}
+
+[5] CONSENTIMIENTOS LEGALES:
+Acepto la Política de Privacidad de CGT: ${datosForm.privacidad ? 'SÍ' : 'NO'}
+Acepto recibir comunicaciones de CGT: ${datosForm.comunicaciones ? 'SÍ' : 'NO'}
+
+[6] OBSERVACIONES O DUDAS:
+${datosForm.observaciones || 'Ninguna observación adicional.'}
+--------------------------------------------------
+Destinatario: cgtfccjuancarlos@hotmail.com`;
+
+  const mailtoUrl = `mailto:cgtfccjuancarlos@hotmail.com?subject=${encodeURIComponent(`Solicitud de Afiliación CGT - ${datosForm.nombre} ${datosForm.apellido1}`)}&body=${encodeURIComponent(textoResumen)}`;
+
+  const handleSubmit = (e) => {
+    e.preventDefault();
+    setEnviado(true);
+    try {
+      window.location.href = mailtoUrl;
+    } catch (err) {
+      console.log("Error mailto:", err);
+    }
+  };
+
+  const handleCopiarDatos = () => {
+    navigator.clipboard.writeText(textoResumen);
+    setCopiado(true);
+    setTimeout(() => setCopiado(false), 3000);
+  };
+
+  return (
+    <div className="animate-fadeIn space-y-6 w-full print-area">
+      <div className="bg-white p-4 md:p-8 rounded-2xl shadow-sm border border-gray-100">
+        <div className="flex items-center gap-3 border-b border-gray-100 pb-4 mb-6">
+          <div className="p-3 bg-red-100 text-red-600 rounded-2xl shrink-0">
+            <Heart className="w-6 h-6 md:w-8 md:h-8 fill-red-600" />
+          </div>
+          <div>
+            <h2 className="text-xl md:text-2xl font-black text-gray-800 tracking-tight">Afíliate a la CGT en FCC</h2>
+            <p className="text-xs md:text-sm text-gray-500 font-bold">Unión, Defensa Colectiva y Asesoría Jurídica Sin Intermediarios</p>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
+          <div className="lg:col-span-4 space-y-5">
+            <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg border border-slate-800">
+              <h3 className="font-black text-sm uppercase tracking-wider mb-4 text-red-400">¿Por qué afiliarte a CGT?</h3>
+              <ul className="space-y-4 text-xs">
+                <li className="flex items-start gap-3">
+                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                  <span className="text-slate-300"><strong className="text-white block">Independencia Total:</strong> No dependemos de subvenciones ni de la empresa. Nos financiamos con nuestras cuotas.</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                  <span className="text-slate-300"><strong className="text-white block">Asesoría Jurídica Gratuita:</strong> Abogados laboralistas especializados a tu disposición.</span>
+                </li>
+                <li className="flex items-start gap-3">
+                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
+                  <span className="text-slate-300"><strong className="text-white block">Democracia Directa:</strong> Las decisiones se toman en asamblea. Tu voz cuenta.</span>
+                </li>
+              </ul>
+            </div>
+
+            <div className="bg-red-50 border border-red-200 p-5 rounded-2xl text-xs text-red-900 font-semibold shadow-sm">
+              <p className="flex items-center gap-2 mb-2"><MapPin className="w-4 h-4 text-red-600" /> Sede CGT Valencia: <strong className="underline">Av. del Cid, 154</strong></p>
+              <p className="flex items-center gap-2 mb-3"><Phone className="w-4 h-4 text-red-600" /> Teléfono: <strong>96 383 44 40</strong></p>
+              <div className="pt-3 border-t border-red-200/60 mt-3 space-y-2">
+                <p className="flex items-center gap-2 uppercase tracking-wide font-black text-red-800"><HelpCircle className="w-4 h-4 text-red-600" /> ¿Tienes alguna duda?</p>
+                <p className="text-[11px] leading-relaxed text-red-800">
+                  Si necesitas ayuda con la afiliación o tienes alguna consulta sindical, escríbenos directamente a:
+                </p>
+                <a href="mailto:cgtfccjuancarlos@hotmail.com" className="inline-flex items-center gap-1.5 font-bold underline text-red-700 hover:text-red-900 break-all bg-white px-2 py-1 rounded border border-red-200">
+                  <Mail className="w-3.5 h-3.5" /> cgtfccjuancarlos@hotmail.com
+                </a>
+              </div>
+            </div>
+          </div>
+
+          <div className="lg:col-span-8">
+            <div className="bg-gray-50 p-5 md:p-6 rounded-2xl border border-gray-200 shadow-inner">
+              <div className="flex items-center gap-2 mb-6 border-b border-gray-200 pb-3">
+                <FileText className="w-5 h-5 text-gray-700" />
+                <h3 className="font-black text-gray-800 text-base uppercase">Ficha Digital de Afiliación</h3>
+              </div>
+
+              {enviado ? (
+                <div className="bg-green-50 border border-green-300 p-6 rounded-2xl text-green-900 space-y-5 shadow-sm animate-fadeIn">
+                  <div className="flex items-center gap-3 border-b border-green-200 pb-4">
+                    <div className="bg-green-600 p-2 rounded-full"><Check className="w-6 h-6 text-white" /></div>
+                    <div>
+                      <p className="font-black text-lg">¡Formulario Completado!</p>
+                      <p className="text-xs text-green-800 mt-0.5">Elige cómo quieres enviar tus datos a <strong className="break-all font-mono bg-white px-1 rounded border border-green-200">cgtfccjuancarlos@hotmail.com</strong></p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <a href={mailtoUrl} className="w-full py-3.5 bg-red-600 hover:bg-red-700 text-white font-black text-xs md:text-sm uppercase tracking-wide rounded-xl shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
+                      <Mail className="w-5 h-5" /> 1. Enviar desde mi App de Correo
+                    </a>
+                    
+                    <button type="button" onClick={handleCopiarDatos} className="w-full py-3.5 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs md:text-sm uppercase tracking-wide rounded-xl shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
+                      <FileText className="w-5 h-5" /> {copiado ? '¡Datos Copiados al Portapapeles!' : '2. Copiar Datos (Opción Alternativa)'}
+                    </button>
+                    <p className="text-[10px] text-center text-green-800 font-semibold px-2">Si el botón rojo no te abre el correo, usa el botón negro para copiar todos los datos y pégalos en tu WhatsApp o en tu correo web de Gmail/Outlook.</p>
+                  </div>
+
+                  <div className="mt-4">
+                    <button type="button" onClick={() => setEnviado(false)} className="text-xs text-green-700 hover:text-green-900 underline font-bold w-full text-center block pt-2">
+                      Volver a modificar los datos
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <form onSubmit={handleSubmit} className="space-y-6">
+                  
+                  <div className="space-y-3">
+                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">1. Datos Personales</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Nombre</label><input type="text" required name="nombre" value={datosForm.nombre} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Primer Apellido</label><input type="text" required name="apellido1" value={datosForm.apellido1} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Segundo Apellido</label><input type="text" name="apellido2" value={datosForm.apellido2} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      <div className="col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">DNI / NIE</label><input type="text" required name="dni" value={datosForm.dni} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Fecha Nacimiento</label><input type="date" required name="fechaNac" value={datosForm.fechaNac} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">2. Contacto y Dirección</h4>
+                    <div className="grid grid-cols-12 gap-3">
+                      <div className="col-span-12 md:col-span-6"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Vía / Dirección</label><input type="text" required name="direccion" value={datosForm.direccion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-4 md:col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Nº</label><input type="text" required name="numero" value={datosForm.numero} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-8 md:col-span-4"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Piso / Pta</label><input type="text" name="piso" value={datosForm.piso} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-4 md:col-span-3"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Cód. Postal</label><input type="text" required name="cp" value={datosForm.cp} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-8 md:col-span-5"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Población</label><input type="text" required name="poblacion" value={datosForm.poblacion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-12 md:col-span-4"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Provincia</label><input type="text" required name="provincia" value={datosForm.provincia} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
+                      <div className="md:col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">E-Mail</label><input type="email" name="email" value={datosForm.email} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Tel. Móvil</label><input type="tel" required name="telMovil" value={datosForm.telMovil} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">3. Datos Laborales</h4>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Empresa</label><input type="text" required name="empresa" value={datosForm.empresa} onChange={handleChange} className="w-full p-2.5 bg-gray-100 border border-gray-300 rounded-lg text-xs font-bold text-gray-600" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Centro de Trabajo</label><input type="text" required name="centroTrabajo" value={datosForm.centroTrabajo} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Situación Laboral</label>
+                        <select name="situacionLaboral" value={datosForm.situacionLaboral} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold">
+                          <option value="">Seleccionar...</option>
+                          <option value="Fijo">Fijo / Indefinido</option>
+                          <option value="Fijo Discontinuo">Fijo Discontinuo</option>
+                          <option value="Eventual">Eventual</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Jornada Laboral</label>
+                        <select name="jornadaLaboral" value={datosForm.jornadaLaboral} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold">
+                          <option value="">Seleccionar...</option>
+                          <option value="Completa">Jornada Completa</option>
+                          <option value="Parcial">Jornada Parcial</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-3">
+                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">4. Orden de Domiciliación Bancaria</h4>
+                    <div>
+                      <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Cuenta IBAN (24 dígitos)</label>
+                      <input type="text" required name="iban" value={datosForm.iban} onChange={handleChange} placeholder="ESXX XXXX XXXX XXXX XXXX XXXX" className="w-full p-3 bg-red-50 border border-red-200 rounded-lg text-sm font-mono font-bold tracking-widest uppercase placeholder-red-200 focus:ring-2 focus:ring-red-500" />
+                    </div>
+                  </div>
+
+                  <div className="space-y-3 bg-gray-100 p-4 rounded-xl border border-gray-200">
+                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-300 pb-1">5. Consentimientos y Observaciones</h4>
+                    
+                    <div className="space-y-3">
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" required name="privacidad" checked={datosForm.privacidad} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded border-gray-300" />
+                        <span className="text-[10px] text-gray-600 leading-tight">
+                          <strong className="text-gray-800">Acepto la Política de Privacidad:</strong> Autorizo a la Confederación General del Trabajo (CGT) al tratamiento de estos datos para tramitar la afiliación, el cobro de la cuota sindical y mantener la relación asociativa, conforme a la normativa vigente de Protección de Datos.
+                        </span>
+                      </label>
+                      <label className="flex items-start gap-3 cursor-pointer">
+                        <input type="checkbox" name="comunicaciones" checked={datosForm.comunicaciones} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded border-gray-300" />
+                        <span className="text-[10px] text-gray-600 leading-tight">
+                          <strong className="text-gray-800">Comunicaciones:</strong> Acepto estar al día de las novedades de CGT y recibir comunicaciones y noticias relacionadas con la entidad.
+                        </span>
+                      </label>
+                    </div>
+
+                    <div className="pt-2">
+                      <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Observaciones o Dudas (Opcional)</label>
+                      <textarea rows="2" name="observaciones" value={datosForm.observaciones} onChange={handleChange} placeholder="Si tienes alguna duda escríbenos aquí..." className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-medium resize-none" />
+                    </div>
+                  </div>
+
+                  <button type="submit" className="w-full py-4 bg-red-600 hover:bg-red-700 text-white font-black text-sm uppercase tracking-wider rounded-xl shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2">
+                    <Send className="w-5 h-5" /> Generar Solicitud de Afiliación
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+});
+
 const TablaPermisos = memo(() => {
+  const [motivo, setMotivo] = useState("");
+  const [grado, setGrado] = useState("");
+  const [desplazamiento, setDesplazamiento] = useState(false);
+  const [resultadoPermiso, setResultadoPermiso] = useState(null);
+
+  const calcularPermiso = () => {
+     if (!motivo || !grado) { setResultadoPermiso(null); return; }
+     let dias = 0;
+     let texto = "";
+     let libroFamilia = "";
+
+     if (motivo === "fallecimiento") {
+         if (grado === "1") { 
+           dias = desplazamiento ? 7 : 4; 
+           texto = desplazamiento 
+             ? "Fallecimiento 1º Grado (4 días hábiles + 3 por desplazamiento según Art. 31 Convenio FCC)" 
+             : "Fallecimiento 1º Grado (4 días hábiles por Art. 31 Convenio FCC)"; 
+           libroFamilia = "Lleva tu Libro de Familia propio y el justificante oficial de defunción."; 
+         }
+         else if (grado === "2") { 
+           dias = desplazamiento ? 6 : 3; 
+           texto = desplazamiento 
+             ? "Fallecimiento 2º Grado (3 días hábiles + 3 por desplazamiento según Art. 31 Convenio FCC)" 
+             : "Fallecimiento 2º Grado (3 días hábiles por Art. 31 Convenio FCC)"; 
+           libroFamilia = "Lleva tu Libro de Familia y el de tus padres para demostrar el parentesco de 2º grado."; 
+         }
+         else if (grado === "3") { 
+           dias = desplazamiento ? 4 : 2; 
+           texto = desplazamiento 
+             ? "Fallecimiento 3º Grado (2 días + 2 adicionales por desplazamiento >200 km según Art. 31 Convenio FCC)" 
+             : "Fallecimiento 3º Grado (2 días según Art. 31 Convenio FCC)"; 
+           libroFamilia = "🚨 ATENCIÓN AL TRUCO: Lleva el Libro de Familia de tus padres Y el de tus abuelos para trazar la línea genealógica exacta hasta tu tío/sobrino."; 
+         }
+     } else if (motivo === "hospitalizacion") {
+         if (grado === "1" || grado === "2") {
+           dias = desplazamiento ? 6 : 5;
+           texto = desplazamiento 
+             ? "Hospitalización / Enfermedad Grave 1º y 2º Grado (3 días + 3 prórroga por desplazamiento = 6 días según Art. 31 Convenio FCC, más favorable que Estatuto)" 
+             : "Hospitalización, Intervención o Reposo Domiciliario 1º y 2º Grado (5 días retribuidos por Ley de Familias / Estatuto Art. 37.3.b)";
+           libroFamilia = "Lleva tu Libro de Familia (y el de tus padres si es hermano/abuelo) y el justificante médico oficial (debe indicar expresamente ingreso o reposo domiciliario).";
+         } else if (grado === "3") {
+           dias = desplazamiento ? 4 : 2;
+           texto = desplazamiento 
+             ? "Hospitalización / Enfermedad Grave 3º Grado (2 días + 2 de prórroga por desplazamiento >200 km según Art. 31 Convenio FCC)" 
+             : "Hospitalización / Enfermedad Grave 3º Grado (2 días según Art. 31 Convenio FCC. El Estatuto no lo cubre, pero nuestro Convenio sí)";
+           libroFamilia = "🚨 ATENCIÓN AL TRUCO: Lleva los Libros de Familia cruzados (el tuyo, el de tus padres Y el de tus abuelos) para trazar la línea genealógica exacta hasta tu tío/sobrino, además del justificante médico.";
+         }
+     } else if (motivo === "matrimonio_fam") {
+         if (["1", "2"].includes(grado)) { 
+           dias = desplazamiento ? 6 : 2; 
+           texto = desplazamiento 
+             ? "Matrimonio de Hijos/as o Hermanos/as (2 días laborables + 4 por desplazamiento según Art. 31 Convenio FCC)" 
+             : "Matrimonio de Hijos/as o Hermanos/as (2 días laborables según Art. 31 Convenio FCC)"; 
+           libroFamilia = "Presenta copia de la invitación oficial y, a posteriori, el justificante del juzgado o registro."; 
+         }
+         else { 
+           setResultadoPermiso({ 
+             dias: 0, 
+             texto: "No hay permiso retribuido estipulado para matrimonio de 3º grado ni en Convenio ni en Estatuto.", 
+             libroFamilia: "Para este evento deberás solicitar días de Asuntos Propios (3 días al año) o permiso no retribuido." 
+           }); 
+           return; 
+         }
+     }
+
+     setResultadoPermiso({ dias, texto, libroFamilia });
+  };
+
+  useEffect(() => { calcularPermiso(); }, [motivo, grado, desplazamiento]);
+
   return (
     <div className="animate-fadeIn space-y-6 w-full print-area">
       <div className="bg-white p-5 md:p-8 rounded-2xl shadow-sm border border-gray-100">
-        <h2 className="text-xl md:text-2xl font-bold border-b border-gray-100 pb-4 mb-6 flex items-center text-blue-900"><Briefcase className="mr-3 text-blue-600 w-8 h-8 shrink-0" /> Permisos Retribuidos y Grados de Parentesco</h2>
+        <div className="flex flex-col md:flex-row justify-between md:items-center border-b border-gray-100 pb-4 mb-6 gap-4">
+          <h2 className="text-xl md:text-2xl font-bold flex items-center text-blue-900">
+            <Briefcase className="mr-3 text-blue-600 w-8 h-8 shrink-0" /> Permisos y Licencias
+          </h2>
+        </div>
+
+        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-6 rounded-2xl border border-blue-200 shadow-inner mb-8">
+           <h3 className="text-lg font-black text-blue-900 mb-4 flex items-center gap-2">
+             <Sparkles className="w-5 h-5 text-blue-600 animate-pulse" /> Asistente Mágico de Permisos
+             <span className="bg-blue-600 text-white text-[10px] px-2 py-1 rounded-full uppercase tracking-widest font-black animate-pulse">¡NUEVA SECCIÓN!</span>
+           </h3>
+           
+           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+             <div>
+               <label className="block text-xs font-bold text-blue-900 mb-2 uppercase">1. ¿Qué ha ocurrido?</label>
+               <select className="w-full p-3.5 bg-white border border-blue-200 rounded-xl text-sm font-medium focus:outline-none" value={motivo} onChange={e => setMotivo(e.target.value)}>
+                 <option value="">Selecciona motivo...</option>
+                 <option value="fallecimiento">Fallecimiento</option>
+                 <option value="hospitalizacion">Hospitalización / Reposo Dom.</option>
+                 <option value="matrimonio_fam">Matrimonio de Familiar</option>
+               </select>
+             </div>
+             <div>
+               <label className="block text-xs font-bold text-blue-900 mb-2 uppercase">2. ¿Qué parentesco tenéis?</label>
+               <select className="w-full p-3.5 bg-white border border-blue-200 rounded-xl text-sm font-medium focus:outline-none" value={grado} onChange={e => setGrado(e.target.value)} disabled={!motivo}>
+                 <option value="">Selecciona grado...</option>
+                 <option value="1">1º Grado (Padres, Hijos, Cónyuge, Suegros)</option>
+                 <option value="2">2º Grado (Hermanos, Abuelos, Nietos, Cuñados)</option>
+                 <option value="3">3º Grado (Tíos, Sobrinos, Bisabuelos)</option>
+               </select>
+             </div>
+             <div className="flex flex-col justify-end">
+               <label className="flex items-center space-x-3 cursor-pointer p-3.5 bg-white border border-blue-200 rounded-xl">
+                 <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={desplazamiento} onChange={e => setDesplazamiento(e.target.checked)} disabled={!motivo || !grado} />
+                 <span className="text-sm font-bold text-blue-900">¿Requiere desplazamiento?</span>
+               </label>
+             </div>
+           </div>
+
+           {resultadoPermiso && (
+             <div className="bg-white p-5 rounded-xl border border-blue-200 shadow-sm mt-4 animate-fadeIn">
+                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Te corresponden:</p>
+                <div className="text-3xl font-black text-blue-700 mb-2">
+                  {resultadoPermiso.dias} Días{" "}
+                  <span className="text-lg text-blue-500">
+                    {desplazamiento ? '(Con desplazamiento)' : '(Sin desplazamiento)'}
+                  </span>
+                </div>
+                <p className="text-sm font-bold text-gray-800 mb-4">{resultadoPermiso.texto}</p>
+                
+                <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg">
+                   <p className="text-xs font-black text-red-800 uppercase tracking-widest mb-1 flex items-center gap-1"><AlertCircle className="w-4 h-4"/> El Truco del Libro de Familia</p>
+                   <p className="text-sm text-red-900 font-medium">{resultadoPermiso.libroFamilia}</p>
+                </div>
+             </div>
+           )}
+        </div>
+
         <div className="grid md:grid-cols-2 gap-8">
           <div className="space-y-3">
             <h3 className="text-base font-bold text-gray-800 uppercase tracking-wide mb-3 flex items-center"><Clock className="w-5 h-5 mr-2 text-blue-600" /> Los 12 Permisos Retribuidos Oficiales</h3>
@@ -1861,52 +2528,6 @@ const VideotecaSindical = memo(() => {
   );
 });
 
-const MonitorActividad = memo(({ estadisticas }) => {
-  const secciones = Object.entries(estadisticas.secciones || {}).sort((a, b) => b[1] - a[1]);
-  const maxClicks = Math.max(...Object.values(estadisticas.secciones || { base: 1 }), 1);
-
-  return (
-    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-6">
-      <h2 className="text-xl font-bold border-b border-gray-100 pb-3 text-gray-800 flex items-center"><PieChart className="mr-3 text-red-600 w-6 h-6" /> Monitor de Mi Actividad Personal</h2>
-      
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div className="bg-gradient-to-br from-red-50 to-orange-50 p-6 rounded-2xl border border-red-200 text-center shadow-sm">
-           <p className="text-xs font-bold text-red-800 uppercase tracking-widest mb-1">Interacciones Totales</p>
-           <p className="text-5xl font-black text-red-700 font-mono">{estadisticas.totalClicks}</p>
-           <p className="text-[10px] text-red-500 font-bold mt-2">Consultas realizadas en tu dispositivo</p>
-        </div>
-        
-        <div className="bg-gradient-to-br from-purple-50 to-indigo-50 p-6 rounded-2xl border border-purple-200 text-center shadow-sm flex flex-col justify-center">
-           <p className="text-xs font-bold text-purple-800 uppercase tracking-widest mb-1">Sección Más Utilizada</p>
-           <p className="text-xl font-black text-purple-900 capitalize">{secciones[0] ? secciones[0][0].replace('_', ' ') : 'Ninguna'}</p>
-           <p className="text-[10px] text-purple-500 font-bold mt-2">Tus preferencias registradas</p>
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        <h3 className="font-bold text-gray-800 text-sm">Ranking de Uso por Herramienta:</h3>
-        {secciones.length === 0 ? (
-          <p className="text-xs text-gray-400 italic">Todavía no hay actividad registrada.</p>
-        ) : (
-          <div className="space-y-2">
-             {secciones.map(([sec, count]) => (
-               <div key={sec} className="bg-gray-50 p-3 rounded-xl border border-gray-200 space-y-1">
-                 <div className="flex justify-between text-xs font-bold text-gray-700">
-                   <span className="capitalize">{sec.replace('_', ' ')}</span>
-                   <span className="font-mono text-purple-700">{count} accesos</span>
-                 </div>
-                 <div className="w-full bg-gray-200 rounded-full h-2 overflow-hidden">
-                   <div className="bg-gradient-to-r from-red-500 to-purple-600 h-2 rounded-full transition-all duration-500" style={{ width: `${(count / maxClicks) * 100}%` }}></div>
-                 </div>
-               </div>
-             ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-});
-
 const ModalNotificaciones = memo(function ModalNotificaciones({ onClose, isDia28, setActiveTab }) {
   const [tab, setTab] = useState('nominas');
 
@@ -1980,255 +2601,6 @@ const ModalNotificaciones = memo(function ModalNotificaciones({ onClose, isDia28
               </div>
             </div>
           )}
-        </div>
-      </div>
-    </div>
-  );
-});
-
-const AfiliateCGT = memo(function AfiliateCGT() {
-  const [enviado, setEnviado] = useState(false);
-  const [copiado, setCopiado] = useState(false);
-  
-  const [datosForm, setDatosForm] = useState({
-    nombre: '', apellido1: '', apellido2: '',
-    direccion: '', numero: '', piso: '', cp: '', poblacion: '', provincia: '',
-    dni: '', fechaNac: '', email: '', telFijo: '', telMovil: '',
-    empresa: 'FCC Medio Ambiente', situacionLaboral: '', jornadaLaboral: '', centroTrabajo: 'Valencia Zona Norte',
-    iban: '', observaciones: '', privacidad: false, comunicaciones: false
-  });
-
-  const handleChange = (e) => {
-    const { name, value, type, checked } = e.target;
-    setDatosForm(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
-  };
-
-  const textoResumen = `SOLICITUD DE AFILIACIÓN Y DOMICILIACIÓN DE CUOTAS - CGT
---------------------------------------------------
-[1] DATOS PERSONALES:
-Nombre completo: ${datosForm.nombre} ${datosForm.apellido1} ${datosForm.apellido2}
-DNI/NIE: ${datosForm.dni} | Fecha de Nacimiento: ${datosForm.fechaNac}
-Dirección: ${datosForm.direccion}, Nº: ${datosForm.numero}, Piso/Pta: ${datosForm.piso}
-Código Postal: ${datosForm.cp} - ${datosForm.poblacion} (${datosForm.provincia})
-
-[2] CONTACTO:
-Teléfono Móvil: ${datosForm.telMovil} | Teléfono Fijo: ${datosForm.telFijo}
-E-mail: ${datosForm.email}
-
-[3] DATOS LABORALES:
-Empresa: ${datosForm.empresa}
-Centro de Trabajo: ${datosForm.centroTrabajo}
-Situación Laboral: ${datosForm.situacionLaboral}
-Jornada Laboral: ${datosForm.jornadaLaboral}
-
-[4] DATOS BANCARIOS (IBAN):
-IBAN: ${datosForm.iban}
-
-[5] CONSENTIMIENTOS LEGALES:
-Acepto la Política de Privacidad de CGT: ${datosForm.privacidad ? 'SÍ' : 'NO'}
-Acepto recibir comunicaciones de CGT: ${datosForm.comunicaciones ? 'SÍ' : 'NO'}
-
-[6] OBSERVACIONES O DUDAS:
-${datosForm.observaciones || 'Ninguna observación adicional.'}
---------------------------------------------------
-Destinatario: cgtfccjuancarlos@hotmail.com`;
-
-  const mailtoUrl = `mailto:cgtfccjuancarlos@hotmail.com?subject=${encodeURIComponent(`Solicitud de Afiliación CGT - ${datosForm.nombre} ${datosForm.apellido1}`)}&body=${encodeURIComponent(textoResumen)}`;
-
-  const handleSubmit = (e) => {
-    e.preventDefault();
-    setEnviado(true);
-    try {
-      window.location.href = mailtoUrl;
-    } catch (err) {
-      console.log("Error mailto:", err);
-    }
-  };
-
-  const handleCopiarDatos = () => {
-    navigator.clipboard.writeText(textoResumen);
-    setCopiado(true);
-    setTimeout(() => setCopiado(false), 3000);
-  };
-
-  return (
-    <div className="animate-fadeIn space-y-6 w-full print-area">
-      <div className="bg-white p-4 md:p-8 rounded-2xl shadow-sm border border-gray-100">
-        <div className="flex items-center gap-3 border-b border-gray-100 pb-4 mb-6">
-          <div className="p-3 bg-red-100 text-red-600 rounded-2xl shrink-0">
-            <Heart className="w-6 h-6 md:w-8 md:h-8 fill-red-600" />
-          </div>
-          <div>
-            <h2 className="text-xl md:text-2xl font-black text-gray-800 tracking-tight">Afíliate a la CGT en FCC</h2>
-            <p className="text-xs md:text-sm text-gray-500 font-bold">Unión, Defensa Colectiva y Asesoría Jurídica Sin Intermediarios</p>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          <div className="lg:col-span-4 space-y-5">
-            <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg border border-slate-800">
-              <h3 className="font-black text-sm uppercase tracking-wider mb-4 text-red-400">¿Por qué afiliarte a CGT?</h3>
-              <ul className="space-y-4 text-xs">
-                <li className="flex items-start gap-3">
-                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <span className="text-slate-300"><strong className="text-white block">Independencia Total:</strong> No dependemos de subvenciones ni de la empresa. Nos financiamos con nuestras cuotas.</span>
-                </li>
-                <li className="flex items-start gap-3">
-                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <span className="text-slate-300"><strong className="text-white block">Asesoría Jurídica Gratuita:</strong> Abogados laboralistas especializados a tu disposición.</span>
-                </li>
-                <li className="flex items-start gap-3">
-                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <span className="text-slate-300"><strong className="text-white block">Democracia Directa:</strong> Las decisiones se toman en asamblea. Tu voz cuenta.</span>
-                </li>
-              </ul>
-            </div>
-
-            <div className="bg-red-50 border border-red-200 p-5 rounded-2xl text-xs text-red-900 font-semibold shadow-sm">
-              <p className="flex items-center gap-2 mb-2"><MapPin className="w-4 h-4 text-red-600" /> Sede CGT Valencia: <strong className="underline">Av. del Cid, 154</strong></p>
-              <p className="flex items-center gap-2 mb-3"><Phone className="w-4 h-4 text-red-600" /> Teléfono: <strong>96 383 44 40</strong></p>
-              <div className="pt-3 border-t border-red-200/60 mt-3 space-y-2">
-                <p className="flex items-center gap-2 uppercase tracking-wide font-black text-red-800"><HelpCircle className="w-4 h-4 text-red-600" /> ¿Tienes alguna duda?</p>
-                <p className="text-[11px] leading-relaxed text-red-800">
-                  Si necesitas ayuda con la afiliación o tienes alguna consulta sindical, escríbenos directamente a:
-                </p>
-                <a href="mailto:cgtfccjuancarlos@hotmail.com" className="inline-flex items-center gap-1.5 font-bold underline text-red-700 hover:text-red-900 break-all bg-white px-2 py-1 rounded border border-red-200">
-                  <Mail className="w-3.5 h-3.5" /> cgtfccjuancarlos@hotmail.com
-                </a>
-              </div>
-            </div>
-          </div>
-
-          <div className="lg:col-span-8">
-            <div className="bg-gray-50 p-5 md:p-6 rounded-2xl border border-gray-200 shadow-inner">
-              <div className="flex items-center gap-2 mb-6 border-b border-gray-200 pb-3">
-                <FileText className="w-5 h-5 text-gray-700" />
-                <h3 className="font-black text-gray-800 text-base uppercase">Ficha Digital de Afiliación</h3>
-              </div>
-
-              {enviado ? (
-                <div className="bg-green-50 border border-green-300 p-6 rounded-2xl text-green-900 space-y-5 shadow-sm animate-fadeIn">
-                  <div className="flex items-center gap-3 border-b border-green-200 pb-4">
-                    <div className="bg-green-600 p-2 rounded-full"><Check className="w-6 h-6 text-white" /></div>
-                    <div>
-                      <p className="font-black text-lg">¡Formulario Completado!</p>
-                      <p className="text-xs text-green-800 mt-0.5">Elige cómo quieres enviar tus datos a <strong className="break-all font-mono bg-white px-1 rounded border border-green-200">cgtfccjuancarlos@hotmail.com</strong></p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <a href={mailtoUrl} className="w-full py-3.5 bg-red-600 hover:bg-red-700 text-white font-black text-xs md:text-sm uppercase tracking-wide rounded-xl shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
-                      <Mail className="w-5 h-5" /> 1. Enviar desde mi App de Correo
-                    </a>
-                    
-                    <button type="button" onClick={handleCopiarDatos} className="w-full py-3.5 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs md:text-sm uppercase tracking-wide rounded-xl shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
-                      <FileText className="w-5 h-5" /> {copiado ? '¡Datos Copiados al Portapapeles!' : '2. Copiar Datos (Opción Alternativa)'}
-                    </button>
-                    <p className="text-[10px] text-center text-green-800 font-semibold px-2">Si el botón rojo no te abre el correo, usa el botón negro para copiar todos los datos y pégalos en tu WhatsApp o en tu correo web de Gmail/Outlook.</p>
-                  </div>
-
-                  <div className="mt-4">
-                    <button type="button" onClick={() => setEnviado(false)} className="text-xs text-green-700 hover:text-green-900 underline font-bold w-full text-center block pt-2">
-                      Volver a modificar los datos
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <form onSubmit={handleSubmit} className="space-y-6">
-                  
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">1. Datos Personales</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Nombre</label><input type="text" required name="nombre" value={datosForm.nombre} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Primer Apellido</label><input type="text" required name="apellido1" value={datosForm.apellido1} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Segundo Apellido</label><input type="text" name="apellido2" value={datosForm.apellido2} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                    </div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <div className="col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">DNI / NIE</label><input type="text" required name="dni" value={datosForm.dni} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Fecha Nacimiento</label><input type="date" required name="fechaNac" value={datosForm.fechaNac} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">2. Contacto y Dirección</h4>
-                    <div className="grid grid-cols-12 gap-3">
-                      <div className="col-span-12 md:col-span-6"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Vía / Dirección</label><input type="text" required name="direccion" value={datosForm.direccion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-4 md:col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Nº</label><input type="text" required name="numero" value={datosForm.numero} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-8 md:col-span-4"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Piso / Pta</label><input type="text" name="piso" value={datosForm.piso} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-4 md:col-span-3"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Cód. Postal</label><input type="text" required name="cp" value={datosForm.cp} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-8 md:col-span-5"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Población</label><input type="text" required name="poblacion" value={datosForm.poblacion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-12 md:col-span-4"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Provincia</label><input type="text" required name="provincia" value={datosForm.provincia} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-                      <div className="md:col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">E-Mail</label><input type="email" name="email" value={datosForm.email} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Tel. Móvil</label><input type="tel" required name="telMovil" value={datosForm.telMovil} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">3. Datos Laborales</h4>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Empresa</label><input type="text" required name="empresa" value={datosForm.empresa} onChange={handleChange} className="w-full p-2.5 bg-gray-100 border border-gray-300 rounded-lg text-xs font-bold text-gray-600" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Centro de Trabajo</label><input type="text" required name="centroTrabajo" value={datosForm.centroTrabajo} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Situación Laboral</label>
-                        <select name="situacionLaboral" value={datosForm.situacionLaboral} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold">
-                          <option value="">Seleccionar...</option>
-                          <option value="Fijo">Fijo / Indefinido</option>
-                          <option value="Fijo Discontinuo">Fijo Discontinuo</option>
-                          <option value="Eventual">Eventual</option>
-                        </select>
-                      </div>
-                      <div>
-                        <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Jornada Laboral</label>
-                        <select name="jornadaLaboral" value={datosForm.jornadaLaboral} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold">
-                          <option value="">Seleccionar...</option>
-                          <option value="Completa">Jornada Completa</option>
-                          <option value="Parcial">Jornada Parcial</option>
-                        </select>
-                      </div>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">4. Orden de Domiciliación Bancaria</h4>
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Cuenta IBAN (24 dígitos)</label>
-                      <input type="text" required name="iban" value={datosForm.iban} onChange={handleChange} placeholder="ESXX XXXX XXXX XXXX XXXX XXXX" className="w-full p-3 bg-red-50 border border-red-200 rounded-lg text-sm font-mono font-bold tracking-widest uppercase placeholder-red-200 focus:ring-2 focus:ring-red-500" />
-                    </div>
-                  </div>
-
-                  <div className="space-y-3 bg-gray-100 p-4 rounded-xl border border-gray-200">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-300 pb-1">5. Consentimientos y Observaciones</h4>
-                    
-                    <div className="space-y-3">
-                      <label className="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" required name="privacidad" checked={datosForm.privacidad} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded border-gray-300" />
-                        <span className="text-[10px] text-gray-600 leading-tight">
-                          <strong className="text-gray-800">Acepto la Política de Privacidad:</strong> Autorizo a la Confederación General del Trabajo (CGT) al tratamiento de estos datos para tramitar la afiliación, el cobro de la cuota sindical y mantener la relación asociativa, conforme a la normativa vigente de Protección de Datos.
-                        </span>
-                      </label>
-                      <label className="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" name="comunicaciones" checked={datosForm.comunicaciones} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded border-gray-300" />
-                        <span className="text-[10px] text-gray-600 leading-tight">
-                          <strong className="text-gray-800">Comunicaciones:</strong> Acepto estar al día de las novedades de CGT y recibir comunicaciones y noticias relacionadas con la entidad.
-                        </span>
-                      </label>
-                    </div>
-
-                    <div className="pt-2">
-                      <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Observaciones o Dudas (Opcional)</label>
-                      <textarea rows="2" name="observaciones" value={datosForm.observaciones} onChange={handleChange} placeholder="Si tienes alguna duda escríbenos aquí..." className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-medium resize-none" />
-                    </div>
-                  </div>
-
-                  <button type="submit" className="w-full py-4 bg-red-600 hover:bg-red-700 text-white font-black text-sm uppercase tracking-wider rounded-xl shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2">
-                    <Send className="w-5 h-5" /> Generar Solicitud de Afiliación
-                  </button>
-                </form>
-              )}
-            </div>
-          </div>
         </div>
       </div>
     </div>
@@ -2473,7 +2845,6 @@ export default function App() {
   const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [voiceCommandToAudit, setVoiceCommandToAudit] = useState(null);
   
-  const { estadisticas, registrarVisita } = useEstadisticasLocales();
   const [apiKey, setApiKey] = useState(() => localStorage.getItem('cgt_gemini_api_key') || '');
 
   const [voiceCalcData, setVoiceCalcData] = useState({
@@ -2572,10 +2943,6 @@ export default function App() {
       });
     }
   };
-
-  useEffect(() => {
-    registrarVisita(activeTab === 'calculadoras' ? `calculadoras_${activeCalcSubTab}` : activeTab);
-  }, [activeTab, activeCalcSubTab, registrarVisita]);
 
   const toggleDarkMode = () => {
     const newMode = !darkMode;
@@ -2704,10 +3071,10 @@ export default function App() {
             <SidebarButton active={activeTab === 'portal'} onClick={() => setActiveTab('portal')} icon={<ExternalLink />} text="Portal del Empleado" />
             <SidebarButton active={activeTab === 'afiliacion'} onClick={() => setActiveTab('afiliacion')} icon={<Heart className="text-red-600" />} text="Afíliate a CGT" />
             <SidebarButton active={activeTab === 'permisos'} onClick={() => setActiveTab('permisos')} icon={<Briefcase />} text="Permisos y Licencias" />
+            <SidebarButton active={activeTab === 'jubilacion'} onClick={() => setActiveTab('jubilacion')} icon={<Award className="text-red-600 animate-pulse" />} text="Simulador Jubilación" esEspecial={true} />
             <SidebarButton active={activeTab === 'antiguedad'} onClick={() => setActiveTab('antiguedad')} icon={<Calendar />} text="Antigüedad y Ayudas" />
             <SidebarButton active={activeTab === 'buscador'} onClick={() => setActiveTab('buscador')} icon={<BookOpen />} text="Convenios Colectivos" />
             <SidebarButton active={activeTab === 'videos'} onClick={() => setActiveTab('videos')} icon={<Play />} text="Videoteca Sindical" />
-            <SidebarButton active={activeTab === 'estadisticas'} onClick={() => setActiveTab('estadisticas')} icon={<PieChart />} text="Mi Actividad" />
           </div>
         </nav>
         
@@ -2796,7 +3163,7 @@ export default function App() {
 
           {/* CONTENIDO INTERACTIVO DE LAS PESTAÑAS */}
           <div className="px-4 md:px-8 max-w-md md:max-w-5xl mx-auto pb-48 md:pb-12 pt-4 md:pt-8 w-full print:p-0 print:max-w-none">
-            {activeTab === 'inicio' && <PantallaInicio setActiveTab={setActiveTab} apiKey={apiKey} />}
+            {activeTab === 'inicio' && <PantallaInicio setActiveTab={setActiveTab} setActiveCalcSubTab={setActiveCalcSubTab} apiKey={apiKey} />}
             {activeTab === 'perfil' && <MiPerfil perfil={perfil} setPerfil={setPerfil} categorias={Object.keys(tablaSalarial2026)} />}
             {activeTab === 'cuadrante' && <MiCuadrante perfil={perfil} />}
             
@@ -2821,7 +3188,7 @@ export default function App() {
             {activeTab === 'antiguedad' && <CalculoAntiguedad perfil={perfil} />}
             {activeTab === 'permisos' && <TablaPermisos />}
             {activeTab === 'videos' && <VideotecaSindical />}
-            {activeTab === 'estadisticas' && <MonitorActividad estadisticas={estadisticas} />}
+            {activeTab === 'jubilacion' && <SimuladorJubilacion perfil={perfil} apiKey={apiKey} onConfigureIA={() => setActiveTab('asistente')} />}
             {activeTab === 'asistente' && <AsistenteIA apiKey={apiKey} onSaveKey={(k) => { setApiKey(k); localStorage.setItem('cgt_gemini_api_key', k); }} onClearKey={() => { setApiKey(''); localStorage.removeItem('cgt_gemini_api_key'); }} />}
           </div>
 
@@ -2864,7 +3231,7 @@ export default function App() {
                 <MobileMenuBtn onClick={() => { setActiveTab('videos'); setShowMobileMore(false); }} icon={<Play/>} title="Videoteca Sindical" desc="Buscador de videos" color="red" />
                 <MobileMenuBtn onClick={() => { setActiveTab('traductor'); setShowMobileMore(false); }} icon={<BookType/>} title="Traductor Legal IA" desc="Traduce convenios a lenguaje claro" color="purple" />
                 <MobileMenuBtn onClick={() => { setActiveTab('redactor'); setShowMobileMore(false); }} icon={<PenTool/>} title="Redactor Mágico IA" desc="Crea instancias y peticiones al instante" color="purple" />
-                <MobileMenuBtn onClick={() => { setActiveTab('estadisticas'); setShowMobileMore(false); }} icon={<PieChart/>} title="Mi Actividad" desc="Monitor de uso personal" color="gray" />
+                <MobileMenuBtn onClick={() => { setActiveTab('jubilacion'); setShowMobileMore(false); }} icon={<Award/>} title="Simulador Jubilación" desc="¡NUEVA SECCIÓN 2026!" color="red" />
                 <MobileMenuBtn onClick={() => { setActiveTab('asistente'); setShowMobileMore(false); }} icon={<Bot/>} title="Asistente Sindical IA" desc="Chatea con nuestro bot" color="purple" />
               </div>
             </div>
