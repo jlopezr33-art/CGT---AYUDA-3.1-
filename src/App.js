@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useCallback, memo, useRef } from 'react';
 import { 
-  Search, Calculator, BookOpen, Calendar, Award, AlertCircle, Clock, Info, Home, 
+  Search, Calculator, BookOpen, Calendar, Award, AlertCircle, CheckCircle, Clock, Info, Home, 
   ChevronRight, Bot, Sparkles, FileText, Loader2, Send, Menu, Key, Check, Timer, 
-  ExternalLink, Download, Upload, FileSearch, Trash2, Shield, Euro, Briefcase, 
+  ExternalLink, Download, Upload, FileSearch, Trash2, Shield, AlertTriangle, Euro, Briefcase, 
   Users, Gift, BookType, PenTool, Settings, Play, Radio, 
   Moon, Sun, User, LayoutGrid, Phone, Mail, HelpCircle, Smartphone, Printer, Globe,
-  Mic, MicOff, Volume2, VolumeX, Command, MessageSquare, Landmark, Bell, Heart, MapPin, X, Plus
+  Mic, MicOff, Volume2, VolumeX, Command, MessageSquare, Landmark, Bell, Heart, MapPin, X, Plus,
+  Cloud, Save
 } from 'lucide-react';
 
 const YoutubeIcon = ({ className }) => (
@@ -23,12 +24,43 @@ const HeartHandshake = ({ className }) => (
 
 const envApiKey = ""; 
 
-const callGeminiAPI = async (promptOrHistory, customApiKey, archivosAdjuntos = []) => {
-  const apiKey = customApiKey || envApiKey; 
+const MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB máximo por archivo
+const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'application/pdf'];
+
+const validarArchivoSeguro = (file) => {
+  if (!file) return { valido: false, error: 'No se ha seleccionado ningún archivo.' };
+  if (!ALLOWED_MIME_TYPES.includes(file.type)) {
+    return { valido: false, error: `Formato no permitido (${file.name}). Sube únicamente fotos (JPG, PNG, WEBP) o documentos PDF.` };
+  }
+  if (file.size > MAX_FILE_SIZE_BYTES) {
+    return { valido: false, error: `El archivo "${file.name}" supera el límite de seguridad de 10 MB.` };
+  }
+  return { valido: true, error: '' };
+};
+
+const clampNumber = (val, min, max, allowDecimals = false) => {
+  const parsed = allowDecimals ? parseFloat(val) : parseInt(val, 10);
+  if (isNaN(parsed)) return min;
+  return Math.min(max, Math.max(min, parsed));
+};
+
+const validarDniNie = (valor) => {
+  if (!valor) return false;
+  const limpio = valor.toUpperCase().replace(/[^A-Z0-9]/g, '');
+  return /^[0-9]{8}[A-Z]$/.test(limpio) || /^[XYZ][0-9]{7}[A-Z]$/.test(limpio);
+};
+
+const validarIbanEspanol = (valor) => {
+  if (!valor) return false;
+  const limpio = valor.toUpperCase().replace(/\s+/g, '');
+  return /^ES[0-9]{22}$/.test(limpio);
+};
+
+const callGeminiAPI = async (promptOrHistory, customApiKey, archivosAdjuntos = [], externalSignal = null) => {
+  const apiKey = (customApiKey || envApiKey).trim(); 
   if (!apiKey) return "Error: No se ha configurado la clave API de Gemini.";
   
   let contents = [];
-  
   if (Array.isArray(promptOrHistory)) {
     let validHistory = promptOrHistory;
     if (validHistory.length > 0 && validHistory[0].role === 'assistant') {
@@ -67,13 +99,24 @@ const callGeminiAPI = async (promptOrHistory, customApiKey, archivosAdjuntos = [
   let lastError = "";
 
   for (const model of modelsToTry) {
+    if (externalSignal?.aborted) {
+      return "Operación cancelada por el usuario.";
+    }
+    const timeoutController = new AbortController();
+    const timeoutId = setTimeout(() => timeoutController.abort(), 35000);
+    const onExternalAbort = () => timeoutController.abort();
+    if (externalSignal) externalSignal.addEventListener('abort', onExternalAbort);
+
     try {
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
       const response = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(payload),
+        signal: timeoutController.signal
       });
+      clearTimeout(timeoutId);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
 
       const data = await response.json();
       if (response.ok) {
@@ -84,9 +127,20 @@ const callGeminiAPI = async (promptOrHistory, customApiKey, archivosAdjuntos = [
             return "Error crítico: La clave API de Google introducida no es válida o tiene errores tipográficos.";
         }
       }
-    } catch (error) { lastError = error.message; }
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (externalSignal) externalSignal.removeEventListener('abort', onExternalAbort);
+      if (externalSignal?.aborted) {
+        return "Operación cancelada por el usuario.";
+      }
+      if (error.name === 'AbortError') {
+        lastError = "Tiempo de espera agotado (35s). Comprueba tu cobertura de internet.";
+      } else {
+        lastError = error.message;
+      }
+    }
   }
-  return `Error de conexión. Se han probado los modelos disponibles pero Google rechaza la clave. Detalle del último error: ${lastError}`;
+  return `Error de conexión. Se han probado los modelos disponibles pero Google rechaza la clave o no hay cobertura. Detalle: ${lastError}`;
 };
 
 const parseVoiceCommandWithGemini = async (userVoiceText, customApiKey, categoriasDisponibles) => {
@@ -143,7 +197,7 @@ const tablaSalarial2026 = {
   "Peón limpieza noche": { base: 31.35, nocturno: 7.84, penoso: 7.84, convenio: 4.10, actividad: 0, recorrido: 0, asistencia: 234.29, transporte: 4.97, marcha: 0, recogida: 0, fallas: 132.14 },
   "Conductor/a limpieza día": { base: 32.19, nocturno: 0, penoso: 8.03, convenio: 4.32, actividad: 0, recorrido: 0, asistencia: 214.27, transporte: 6.08, marcha: 17.66, recogida: 0, fallas: 132.14 },
   "Conductor/a limpieza noche": { base: 32.19, nocturno: 8.03, penoso: 8.03, convenio: 4.32, actividad: 0, recorrido: 0, asistencia: 199.58, transporte: 6.15, marcha: 20.39, recogida: 0, fallas: 132.14 },
-  "Conductor/a barredora día": { base: 32.19, nocturno: 0, penoso: 9.69, convenio: 4.32, actividad: 0, recorrido: 0, asistencia: 214.27, transporte: 6.08, marcha: 0, recogida: 0, fallas: 132.14 },
+  "Conductor/a barredora día": { base: 32.19, nocturno: 0, penoso: 9.69, convenio: 4.32, actividad: 0, recorrido: 0, asistencia: 214.27, transporte: 6.08, marcha: 17.66, recogida: 0, fallas: 132.14 },
   "Conductor/a barredora noche": { base: 32.19, nocturno: 8.03, penoso: 9.69, convenio: 4.32, actividad: 0, recorrido: 0, asistencia: 192.54, transporte: 6.15, marcha: 20.39, recogida: 0, fallas: 132.14 },
   "Peón recogida día": { base: 31.11, nocturno: 0, penoso: 9.42, convenio: 4.89, actividad: 26.20, recorrido: 0, asistencia: 104.43, transporte: 5.41, marcha: 0, recogida: 353.30, fallas: 130.91 },
   "Peón recogida noche": { base: 31.11, nocturno: 9.42, penoso: 9.42, convenio: 4.89, actividad: 25.40, recorrido: 0, asistencia: 90.02, transporte: 5.46, marcha: 0, recogida: 353.30, fallas: 130.91 },
@@ -232,7 +286,7 @@ const conceptosSociales = {
   ]
 };
 
-const calcularDiferenciaDiaria = (categoriaPropia, categoriaSuperior, bivolante = false, porter = false) => {
+const calcularDiferenciaDiaria = (categoriaPropia, categoriaSuperior, bivolante = false, porter = false, diasSueltosRecogida = false) => {
   const dSup = tablaSalarial2026[categoriaSuperior];
   const dProp = tablaSalarial2026[categoriaPropia];
   if (!dSup || !dProp) return { diferenciaDiariaFinal: 0, diferenciaConceptos: [] };
@@ -255,6 +309,7 @@ const calcularDiferenciaDiaria = (categoriaPropia, categoriaSuperior, bivolante 
 
   const diffs = [];
   Object.keys(nombresConceptos).forEach(key => {
+    if (key === 'recogida' && diasSueltosRecogida) return;
     const getVal = (cat, divisorAnual) => {
       if (key === 'asistencia') return (cat.asistencia * 12) / divisorAnual;
       if (key === 'recogida') return (cat.recogida || 0) / 30;
@@ -322,7 +377,6 @@ const BotonAccesoRapido = memo(function BotonAccesoRapido({ icon, color, titulo,
 });
 
 const SimuladorJubilacion = memo(({ perfil, apiKey, onConfigureIA }) => {
-  // Calculamos los años de ingreso iniciales basados en el perfil si existen
   const calcularAntiguedadInicial = () => {
     if (!perfil?.fechaIngreso) return 25;
     const ingreso = new Date(perfil.fechaIngreso);
@@ -335,30 +389,14 @@ const SimuladorJubilacion = memo(({ perfil, apiKey, onConfigureIA }) => {
   const [baseReguladora, setBaseReguladora] = useState(1800);
   const [edad, setEdad] = useState("65");
   const [anosEmpresa, setAnosEmpresa] = useState(calcularAntiguedadInicial);
-
-  // Estados para el Escáner de Nómina IA
   const [archivoNomina, setArchivoNomina] = useState(null);
   const [isScanning, setIsScanning] = useState(false);
   const [scanSuccess, setScanSuccess] = useState('');
   const [errorScan, setErrorScan] = useState('');
+  const abortControllerRef = useRef(null);
 
-  const penalizaciones = {
-    "66": 0.00,
-    "65": 0.00,
-    "64.5": 3.82,
-    "64": 5.25,
-    "63.5": 8.40,
-    "63": 19.00
-  };
-
-  const premiosConvenio = {
-    "66": 0,
-    "65": 0,
-    "64.5": 215.37,
-    "64": 323.06,
-    "63.5": 430.75,
-    "63": 592.28
-  };
+  const penalizaciones = { "66": 0.00, "65": 0.00, "64.5": 3.82, "64": 5.25, "63.5": 8.40, "63": 19.00 };
+  const premiosConvenio = { "66": 0, "65": 0, "64.5": 215.37, "64": 323.06, "63.5": 430.75, "63": 592.28 };
 
   const importeAno = premiosConvenio[edad] || 0;
   const penalizacionPorcentaje = penalizaciones[edad] || 0;
@@ -369,13 +407,17 @@ const SimuladorJubilacion = memo(({ perfil, apiKey, onConfigureIA }) => {
   const handleFileChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      const check = validarArchivoSeguro(file);
+      if (!check.valido) {
+        setArchivoNomina(null);
+        setScanSuccess('');
+        setErrorScan(check.error);
+        e.target.value = '';
+        return;
+      }
       const reader = new FileReader();
       reader.onloadend = () => {
-        setArchivoNomina({
-          data: reader.result.split(',')[1],
-          mimeType: file.type,
-          name: file.name
-        });
+        setArchivoNomina({ data: reader.result.split(',')[1], mimeType: file.type, name: file.name });
         setScanSuccess('');
         setErrorScan('');
       };
@@ -383,47 +425,42 @@ const SimuladorJubilacion = memo(({ perfil, apiKey, onConfigureIA }) => {
     }
   };
 
+  const cancelarEscaneo = () => {
+    abortControllerRef.current?.abort();
+    setIsScanning(false);
+    setErrorScan('Análisis cancelado por el usuario.');
+  };
+
   const ejecutarEscaneoNomina = async () => {
-    if (!apiKey) {
-      onConfigureIA?.();
-      return;
-    }
+    if (!apiKey) { onConfigureIA?.(); return; }
     if (!archivoNomina) return;
     setIsScanning(true);
     setErrorScan('');
     setScanSuccess('');
+    abortControllerRef.current = new AbortController();
 
     const prompt = `Analiza la imagen o PDF de esta nómina de FCC Medio Ambiente para ayudar al trabajador a simular su jubilación.
-Tu objetivo es extraer 2 datos clave de la nómina:
-1. "baseEstimada": Localiza la Base de Cotización por Contingencias Comunes (B.C.C.C.), Base IRPF o Total Devengado de la nómina (el valor mensual bruto de cotización para calcular su pensión, en euros, como número decimal, ej: 1845.50).
-2. "anosEmpresa": Los años de antigüedad en la empresa si aparece la fecha de ingreso o antigüedad en la nómina (calculados respecto al año 2026, como número entero, ej: 24). Si no aparece ninguna fecha o año de antigüedad, devuelve null.
-3. "resumen": Breve frase de 1 línea indicando exactamente qué datos has localizado (ej: "Leída Base de Contingencias Comunes de 1.845,50 € y 24 años de antigüedad en FCC").
-
-Responde ÚNICAMENTE con un objeto JSON sin bloques de código ni texto adicional con esta estructura exacta:
-{
-  "baseEstimada": 1845.50,
-  "anosEmpresa": 24,
-  "resumen": "Localizada Base de Cotización de 1.845,50 € y 24 años de antigüedad."
-}`;
+Extrae:
+1. "baseEstimada": Base de Cotización por Contingencias Comunes, Base IRPF o Total Devengado (número decimal).
+2. "anosEmpresa": Años de antigüedad en la empresa respecto a 2026 (número entero o null).
+3. "resumen": Breve frase de 1 línea indicando qué datos has localizado.
+Responde ÚNICAMENTE con un objeto JSON: {"baseEstimada": 1845.50, "anosEmpresa": 24, "resumen": "Localizada Base de Cotización de 1.845,50 € y 24 años de antigüedad."}`;
 
     try {
-      const res = await callGeminiAPI(prompt, apiKey, [archivoNomina]);
+      const res = await callGeminiAPI(prompt, apiKey, [archivoNomina], abortControllerRef.current.signal);
+      if (res === "Operación cancelada por el usuario.") return;
       const cleanText = res.replace(/```json/gi, '').replace(/```/g, '').trim();
       const match = cleanText.match(/\{[\s\S]*\}/);
       if (match) {
         const data = JSON.parse(match[0]);
-        if (data.baseEstimada && !isNaN(Number(data.baseEstimada))) {
-          setBaseReguladora(Math.round(Number(data.baseEstimada) * 100) / 100);
-        }
-        if (data.anosEmpresa && !isNaN(Number(data.anosEmpresa))) {
-          setAnosEmpresa(Number(data.anosEmpresa));
-        }
+        if (data.baseEstimada && !isNaN(Number(data.baseEstimada))) setBaseReguladora(clampNumber(Number(data.baseEstimada), 0, 15000, true));
+        if (data.anosEmpresa && !isNaN(Number(data.anosEmpresa))) setAnosEmpresa(clampNumber(Number(data.anosEmpresa), 0, 55, false));
         setScanSuccess(data.resumen || "¡Datos de nómina extraídos y aplicados con éxito!");
       } else {
-        setErrorScan("No se pudieron detectar las cifras automáticamente. Puedes introducirlas o ajustarlas manualmente abajo.");
+        setErrorScan("No se pudieron detectar las cifras automáticamente. Puedes introducirlas manualmente abajo.");
       }
     } catch (err) {
-      setErrorScan("Hubo una incidencia al analizar el archivo. Introduce los datos manualmente en los campos inferiores.");
+      setErrorScan("Hubo una incidencia al analizar el archivo. Introduce los datos manualmente.");
     } finally {
       setIsScanning(false);
     }
@@ -442,130 +479,54 @@ Responde ÚNICAMENTE con un objeto JSON sin bloques de código ni texto adiciona
           <span>Cálculos basados en la legislación de la Seguridad Social para 2026 y premio del Convenio de FCC (Anexo IV Art. 41). Revisar anualmente.</span>
         </div>
 
-        {/* TARJETA ASISTENTE IA: ESCANEAR NÓMINA (OPCIONAL) */}
         <div className="bg-gradient-to-br from-purple-50 via-indigo-50 to-blue-50 border-2 border-purple-200 rounded-2xl p-5 md:p-6 mb-8 shadow-sm no-print">
           <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-b border-purple-200 pb-3 mb-4">
             <h3 className="text-base font-black text-purple-900 flex items-center gap-2">
-              <Sparkles className="w-5 h-5 text-purple-600 animate-pulse" />
-              ¿Tienes tu nómina a mano? Escanéala con IA (Opcional)
+              <Sparkles className="w-5 h-5 text-purple-600 animate-pulse" /> ¿Tienes tu nómina a mano? Escanéala con IA (Opcional)
             </h3>
             <span className="bg-purple-600 text-white text-[10px] px-2.5 py-1 rounded-full uppercase tracking-wider font-extrabold">Autocompletado Mágico</span>
           </div>
-
           <p className="text-xs md:text-sm text-purple-950 font-medium leading-relaxed mb-3">
-            Sube una <strong>foto o PDF de tu nómina más reciente</strong> de FCC. La Inteligencia Artificial localizará automáticamente tu <strong>Base de Cotización</strong> y tus <strong>años en la empresa</strong> para que no tengas que buscar ningún número.
+            Sube una <strong>foto o PDF de tu nómina más reciente</strong> de FCC (máx. 10 MB). La Inteligencia Artificial localizará automáticamente tu <strong>Base de Cotización</strong> y tus <strong>años en la empresa</strong>.
           </p>
-
-          <div className="bg-amber-100/70 border border-amber-300 text-amber-900 text-[11px] p-3 rounded-xl mb-4 flex items-start gap-2 font-medium">
-            <AlertCircle className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
-            <span><strong>Aviso orientativo:</strong> La IA tomará la base mensual de tu nómina actual como cálculo orientativo. La pensión oficial definitiva la calcula la Seguridad Social sumando y promediando las bases de cotización de tus últimos 25 años (300 bases).</span>
-          </div>
-
           <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
             <div className="md:col-span-7">
               <div className="border-2 border-dashed border-purple-300 hover:border-purple-500 bg-white/80 rounded-xl p-4 flex flex-col items-center justify-center text-center relative cursor-pointer transition">
-                <input 
-                  type="file" 
-                  accept="image/*,application/pdf" 
-                  onChange={handleFileChange} 
-                  className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" 
-                  title="Sube tu nómina en foto o PDF" 
-                />
+                <input type="file" aria-label="Subir nómina para simular jubilación" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" />
                 <div className="flex items-center gap-3">
-                  <div className="p-2.5 bg-purple-100 text-purple-700 rounded-xl">
-                    <Upload className="w-6 h-6" />
-                  </div>
+                  <div className="p-2.5 bg-purple-100 text-purple-700 rounded-xl"><Upload className="w-6 h-6" /></div>
                   <div className="text-left">
-                    <p className="font-bold text-xs md:text-sm text-gray-800">
-                      {archivoNomina ? archivoNomina.name : 'Pulsa aquí para subir tu nómina (Foto o PDF)'}
-                    </p>
-                    <p className="text-[10px] text-gray-500 font-semibold">Formatos JPG, PNG o PDF de cualquier tamaño</p>
+                    <p className="font-bold text-xs md:text-sm text-gray-800">{archivoNomina ? archivoNomina.name : 'Pulsa aquí para subir tu nómina (Foto o PDF)'}</p>
+                    <p className="text-[10px] text-gray-500 font-semibold">Formatos seguros: JPG, PNG o PDF (Máx. 10 MB)</p>
                   </div>
                 </div>
               </div>
             </div>
-
             <div className="md:col-span-5 flex flex-col gap-2">
-              <button 
-                onClick={ejecutarEscaneoNomina} 
-                disabled={isScanning || !archivoNomina}
-                className={`w-full py-3.5 px-4 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 text-white ${
-                  isScanning 
-                    ? 'bg-purple-400 cursor-not-allowed' 
-                    : !apiKey 
-                      ? 'bg-amber-600 hover:bg-amber-700 animate-pulse' 
-                      : !archivoNomina 
-                        ? 'bg-gray-300 text-gray-500 cursor-not-allowed' 
-                        : 'bg-gradient-to-r from-purple-600 to-indigo-600 hover:from-purple-700 hover:to-indigo-700'
-                }`}
-              >
-                {isScanning ? (
-                  <><Loader2 className="w-4 h-4 animate-spin" /> Analizando Nómina...</>
-                ) : !apiKey ? (
-                  <><Key className="w-4 h-4" /> Configurar Clave IA</>
-                ) : (
-                  <><Sparkles className="w-4 h-4" /> Rellenar Datos con IA</>
-                )}
+              <button onClick={ejecutarEscaneoNomina} disabled={isScanning || !archivoNomina} className={`w-full py-3.5 px-4 rounded-xl font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-2 shadow-md transition-all text-white ${isScanning ? 'bg-purple-400' : !apiKey ? 'bg-amber-600 animate-pulse' : !archivoNomina ? 'bg-gray-300 text-gray-500' : 'bg-gradient-to-r from-purple-600 to-indigo-600'}`}>
+                {isScanning ? <><Loader2 className="w-4 h-4 animate-spin" /> Analizando Nómina...</> : !apiKey ? <><Key className="w-4 h-4" /> Configurar Clave IA</> : <><Sparkles className="w-4 h-4" /> Rellenar Datos con IA</>}
               </button>
-
-              {archivoNomina && (
-                <button 
-                  onClick={() => { setArchivoNomina(null); setScanSuccess(''); setErrorScan(''); }}
-                  className="text-[11px] text-red-600 hover:text-red-800 font-bold text-center underline"
-                >
-                  Quitar archivo seleccionado
-                </button>
+              {isScanning && (
+                <button onClick={cancelarEscaneo} className="text-xs bg-red-100 text-red-700 font-bold py-1.5 px-3 rounded-lg hover:bg-red-200 transition">Cancelar análisis</button>
+              )}
+              {archivoNomina && !isScanning && (
+                <button onClick={() => { setArchivoNomina(null); setScanSuccess(''); setErrorScan(''); }} className="text-[11px] text-red-600 font-bold text-center underline">Quitar archivo</button>
               )}
             </div>
           </div>
-
-          {scanSuccess && (
-            <div className="mt-4 p-3.5 bg-green-100 border border-green-300 text-green-900 rounded-xl text-xs font-bold flex items-center gap-2 animate-fadeIn">
-              <Check className="w-5 h-5 text-green-700 shrink-0" />
-              <span>{scanSuccess} <em>(Revisa y ajusta los valores abajo si lo necesitas)</em>.</span>
-            </div>
-          )}
-
-          {errorScan && (
-            <div className="mt-4 p-3.5 bg-red-100 border border-red-300 text-red-900 rounded-xl text-xs font-bold flex items-center gap-2 animate-fadeIn">
-              <AlertCircle className="w-5 h-5 text-red-600 shrink-0" />
-              <span>{errorScan}</span>
-            </div>
-          )}
-        </div>
-
-        {/* PARTE MANUAL: DATOS Y CÁLCULO EN TIEMPO REAL */}
-        <div className="flex items-center gap-2 border-b border-gray-200 pb-2 mb-6">
-          <Calculator className="w-5 h-5 text-red-600" />
-          <h3 className="font-black text-gray-800 text-sm uppercase tracking-wide">
-            O introduce / ajusta tus datos manualmente:
-          </h3>
+          {scanSuccess && <div className="mt-4 p-3.5 bg-green-100 border border-green-300 text-green-900 rounded-xl text-xs font-bold flex items-center gap-2"><Check className="w-5 h-5 text-green-700 shrink-0" /><span>{scanSuccess}</span></div>}
+          {errorScan && <div className="mt-4 p-3.5 bg-red-100 border border-red-300 text-red-900 rounded-xl text-xs font-bold flex items-center gap-2"><AlertCircle className="w-5 h-5 text-red-600 shrink-0" /><span>{errorScan}</span></div>}
         </div>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
           <div className="space-y-5 bg-gray-50 p-6 rounded-xl border border-gray-200">
             <div>
-              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide flex justify-between">
-                <span>Base Reguladora Estimada (€/mes)</span>
-                {scanSuccess && <span className="text-purple-700 font-extrabold text-[10px] bg-purple-100 px-2 py-0.5 rounded">Autocompletado con IA</span>}
-              </label>
-              <input 
-                type="number" 
-                step="0.01" 
-                value={baseReguladora} 
-                onChange={e => setBaseReguladora(Number(e.target.value))} 
-                className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-lg text-gray-800 focus:ring-2 focus:ring-red-500 outline-none shadow-sm" 
-              />
-              <p className="text-[10px] text-gray-500 mt-1">Suele coincidir de forma orientativa con tu Base de Contingencias Comunes.</p>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Base Reguladora Estimada (€/mes)</label>
+              <input type="number" min="0" max="15000" step="0.01" value={baseReguladora} onChange={e => setBaseReguladora(clampNumber(e.target.value, 0, 15000, true))} className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-lg text-gray-800 outline-none shadow-sm" />
             </div>
-
             <div>
               <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Edad a la que te quieres jubilar</label>
-              <select 
-                value={edad} 
-                onChange={e => setEdad(e.target.value)} 
-                className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-gray-800 focus:ring-2 focus:ring-red-500 outline-none shadow-sm"
-              >
+              <select value={edad} onChange={e => setEdad(e.target.value)} className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-gray-800 outline-none shadow-sm">
                 <option value="66">66 años (Ordinaria / Demorada - 0€ premio)</option>
                 <option value="65">65 años (Ordinaria - 0% penalización - 0€ premio)</option>
                 <option value="64.5">64 años y 6 meses (Adelanto 6 meses - 215,37 €/año)</option>
@@ -573,22 +534,10 @@ Responde ÚNICAMENTE con un objeto JSON sin bloques de código ni texto adiciona
                 <option value="63.5">63 años y 6 meses (Adelanto 18 meses - 430,75 €/año)</option>
                 <option value="63">63 años (Adelanto 24 meses - 592,28 €/año)</option>
               </select>
-              <p className="text-[10px] text-gray-500 mt-1">*Ejemplo de coeficientes reductores oficiales para trabajadores con más de 38,5 años cotizados.</p>
             </div>
-
             <div className="pt-4 border-t border-gray-200">
-              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide flex justify-between">
-                <span>Años trabajados en FCC (Premio Art. 41)</span>
-                {scanSuccess && <span className="text-purple-700 font-extrabold text-[10px] bg-purple-100 px-2 py-0.5 rounded">Autocompletado con IA</span>}
-              </label>
-              <input 
-                type="number" 
-                min="0" 
-                value={anosEmpresa} 
-                onChange={e => setAnosEmpresa(Number(e.target.value))} 
-                className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-lg text-gray-800 focus:ring-2 focus:ring-red-500 outline-none shadow-sm" 
-              />
-              <p className="text-[10px] text-gray-500 mt-1">Años de servicio acreditados en la contrata de FCC Valencia Zona Norte.</p>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Años trabajados en FCC (Premio Art. 41)</label>
+              <input type="number" min="0" max="55" value={anosEmpresa} onChange={e => setAnosEmpresa(clampNumber(e.target.value, 0, 55, false))} className="w-full p-3.5 bg-white border border-gray-300 rounded-xl font-bold text-lg text-gray-800 outline-none shadow-sm" />
             </div>
           </div>
 
@@ -600,13 +549,11 @@ Responde ÚNICAMENTE con un objeto JSON sin bloques de código ni texto adiciona
               </div>
               {penalizacionPorcentaje > 0 ? (
                 <div className="bg-red-50 text-red-700 text-xs font-bold p-3 rounded-lg border border-red-200 flex items-center gap-2">
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                  Penalización del {penalizacionPorcentaje}% (-{dineroRestado.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}€/mes)
+                  <AlertCircle className="w-4 h-4 shrink-0" /> Penalización del {penalizacionPorcentaje}% (-{dineroRestado.toLocaleString('es-ES', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}€/mes)
                 </div>
               ) : (
                 <div className="bg-green-50 text-green-700 text-xs font-bold p-3 rounded-lg border border-green-200 flex items-center gap-2">
-                  <Check className="w-4 h-4 shrink-0" />
-                  Cobras el 100% (Sin recortes por adelanto)
+                  <Check className="w-4 h-4 shrink-0" /> Cobras el 100% (Sin recortes por adelanto)
                 </div>
               )}
             </div>
@@ -644,6 +591,8 @@ const PantallaInicio = memo(function PantallaInicio({ setActiveTab, setActiveCal
       <style>{`
         @keyframes sweep { 0% { transform: translateX(-100%) skewX(-15deg); } 100% { transform: translateX(200%) skewX(-15deg); } }
         .light-sweep { position: absolute; top: 0; left: 0; width: 50%; height: 100%; background: linear-gradient(to right, rgba(255,255,255,0) 0%, rgba(255,255,255,0.3) 50%, rgba(255,255,255,0) 100%); animation: sweep 4s infinite; pointer-events: none; z-index: 30; }
+        .text-3d-red { color: #dc2626; text-shadow: 1px 1px 0px #ffffff, 2px 2px 0px #ffffff, 3px 3px 0px #d1d5db, 4px 4px 8px rgba(0,0,0,0.15); }
+        .text-3d-black { color: #111827; text-shadow: 1px 1px 0px #ffffff, 2px 2px 0px #ffffff, 3px 3px 0px #d1d5db, 4px 4px 8px rgba(0,0,0,0.15); }
       `}</style>
 
       <div className={`relative w-full h-64 md:h-[400px] rounded-2xl overflow-hidden shadow-lg transition-colors duration-1000 ${currentImageIndex % 2 === 0 ? 'bg-red-800' : 'bg-amber-600'}`}>
@@ -652,7 +601,7 @@ const PantallaInicio = memo(function PantallaInicio({ setActiveTab, setActiveCal
         <div className="light-sweep"></div>
         
         {images.map((img, idx) => (
-          <img key={img} src={img} alt={`Cartel ${idx + 1}`} className={`absolute inset-0 w-full h-full object-contain p-2 md:p-6 transition-opacity duration-1000 drop-shadow-2xl z-10 ${currentImageIndex === idx ? 'opacity-100' : 'opacity-0'}`} />
+          <img key={img} src={img} alt={`Cartel ${idx + 1}`} onError={(e) => { e.target.style.display = 'none'; }} className={`absolute inset-0 w-full h-full object-contain p-2 md:p-6 transition-opacity duration-1000 drop-shadow-2xl z-10 ${currentImageIndex === idx ? 'opacity-100' : 'opacity-0'}`} />
         ))}
         
         <div className="absolute bottom-4 left-0 right-0 z-30 flex justify-center gap-2">
@@ -697,9 +646,8 @@ const PantallaInicio = memo(function PantallaInicio({ setActiveTab, setActiveCal
           <BotonAccesoRapido icon={<Calculator className="w-6 h-6 md:w-8 md:h-8"/>} color="red" titulo="Diferencias" subtitulo="Categoría superior" onClick={() => { setActiveTab('calculadoras'); setActiveCalcSubTab('diferencias'); }} />
           <BotonAccesoRapido icon={<Award className="w-6 h-6 md:w-8 md:h-8 text-red-600 animate-pulse"/>} color="red" titulo="Jubilación" subtitulo="Simulador 2026" onClick={() => setActiveTab('jubilacion')} />
           <BotonAccesoRapido icon={<Euro className="w-6 h-6 md:w-8 md:h-8 text-green-700"/>} color="green" titulo="Pagas y Pluses" subtitulo="Pagas extras anuales" onClick={() => setActiveTab('pagas')} />
-          <BotonAccesoRapido icon={<Calendar className="w-6 h-6 md:w-8 md:h-8"/>} color="green" titulo="Antigüedad" subtitulo="Cálculos y premios" onClick={() => setActiveTab('antiguedad')} />
           <BotonAccesoRapido icon={<PenTool className="w-6 h-6 md:w-8 md:h-8 text-purple-600"/>} color="purple" titulo="Redactor" subtitulo="Peticiones RRHH" onClick={() => setActiveTab('redactor')} />
-          <BotonAccesoRapido icon={<FileSearch className="w-6 h-6 md:w-8 md:h-8 text-purple-600 animate-pulse"/>} color="purple" titulo="Auditar Nómina 2026" subtitulo="Análisis por IA" onClick={() => setActiveTab('auditoria')} />
+          <BotonAccesoRapido icon={<FileSearch className="w-6 h-6 md:w-8 md:h-8 text-purple-600 animate-pulse"/>} color="purple" titulo="Auditar Nómina" subtitulo="Análisis por IA" onClick={() => setActiveTab('auditoria')} />
         </div>
       </div>
 
@@ -729,24 +677,24 @@ const MiPerfil = memo(function MiPerfil({ perfil, setPerfil, categorias }) {
         <h2 className="text-xl font-bold border-b border-gray-100 pb-3 mb-6 flex items-center text-gray-800">
           <User className="mr-3 text-blue-600 w-6 h-6" /> Mi Perfil de Trabajador
         </h2>
-        <p className="text-gray-500 text-sm mb-6 font-medium">Configura tus datos básicos una sola vez. Las calculadoras se rellenarán automáticamente.</p>
+        <p className="text-gray-500 text-sm mb-6 font-medium">Configura tus datos básicos una sola vez. Las calculadoras y tu cuadrante se rellenarán automáticamente.</p>
 
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-gray-50 p-6 rounded-xl border border-gray-100">
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Categoría Principal (Base)</label>
-            <select className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" value={perfil.categoria} onChange={e => setPerfil({...perfil, categoria: e.target.value})}>
+            <select className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 outline-none" value={perfil.categoria} onChange={e => setPerfil({...perfil, categoria: e.target.value})}>
               {categorias.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Categoría Superior Habitual</label>
-            <select className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" value={perfil.categoriaSuperior} onChange={e => setPerfil({...perfil, categoriaSuperior: e.target.value})}>
+            <select className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 outline-none" value={perfil.categoriaSuperior} onChange={e => setPerfil({...perfil, categoriaSuperior: e.target.value})}>
               {categorias.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
           </div>
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Turno Habitual</label>
-            <select className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" value={perfil.turno} onChange={e => setPerfil({...perfil, turno: e.target.value})}>
+            <select className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 outline-none" value={perfil.turno} onChange={e => setPerfil({...perfil, turno: e.target.value})}>
               <option value="DIA">Turno de Día</option>
               <option value="NOCHE">Turno de Noche</option>
               <option value="TALLER">Taller</option>
@@ -754,17 +702,17 @@ const MiPerfil = memo(function MiPerfil({ perfil, setPerfil, categorias }) {
           </div>
           <div>
             <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide">Fecha Ingreso (Antigüedad)</label>
-            <input type="date" className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 focus:ring-2 focus:ring-blue-500 outline-none" value={perfil.fechaIngreso} onChange={e => setPerfil({...perfil, fechaIngreso: e.target.value})} />
+            <input type="date" className="w-full p-3.5 bg-white border border-gray-200 rounded-xl text-sm shadow-sm font-medium text-gray-800 outline-none" value={perfil.fechaIngreso} onChange={e => setPerfil({...perfil, fechaIngreso: e.target.value})} />
           </div>
           <div className="flex flex-col justify-center space-y-3 pt-4">
-             <label className="flex items-center space-x-3 cursor-pointer">
-                <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={perfil.bivolante} onChange={e => setPerfil({...perfil, bivolante: e.target.checked})} />
-                <span className="text-sm font-bold text-gray-800">Conduzco vehículo Bivolante</span>
-             </label>
-             <label className="flex items-center space-x-3 cursor-pointer">
-                <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={perfil.porter} onChange={e => setPerfil({...perfil, porter: e.target.checked})} />
-                <span className="text-sm font-bold text-gray-800">Conduzco vehículo Porter</span>
-             </label>
+            <label className="flex items-center space-x-3 cursor-pointer">
+              <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={perfil.bivolante} onChange={e => setPerfil({...perfil, bivolante: e.target.checked})} />
+              <span className="text-sm font-bold text-gray-800">Conduzco vehículo Bivolante</span>
+            </label>
+            <label className="flex items-center space-x-3 cursor-pointer">
+              <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={perfil.porter} onChange={e => setPerfil({...perfil, porter: e.target.checked})} />
+              <span className="text-sm font-bold text-gray-800">Conduzco vehículo Porter</span>
+            </label>
           </div>
         </div>
         <div className="mt-6 flex justify-end">
@@ -778,88 +726,470 @@ const MiPerfil = memo(function MiPerfil({ perfil, setPerfil, categorias }) {
 });
 
 const MiCuadrante = memo(function MiCuadrante({ perfil }) {
-  const [dias, setDias] = useState(() => {
-    const guardado = localStorage.getItem('cgt_cuadrante_dias');
-    return guardado ? JSON.parse(guardado) : Array(31).fill('null');
+  const [currentDate, setCurrentDate] = useState(new Date());
+  const [cuadrante, setCuadrante] = useState(() => {
+    try {
+      const localData = localStorage.getItem('cgt_fcc_cuadrante_avanzado');
+      return localData ? JSON.parse(localData) : {};
+    } catch (e) {
+      return {};
+    }
   });
+  const [selectedDay, setSelectedDay] = useState(null);
+  const [cloudStatus, setCloudStatus] = useState('synced');
 
-  useEffect(() => {
-    localStorage.setItem('cgt_cuadrante_dias', JSON.stringify(dias));
-  }, [dias]);
-  
-  const toggleDia = (index) => {
-    setDias(prev => {
-      const newDias = [...prev];
-      const estados = ['null', 'D', 'CS'];
-      const nextIndex = (estados.indexOf(newDias[index]) + 1) % estados.length;
-      newDias[index] = estados[nextIndex];
-      return newDias;
-    });
+  const saveToStorage = useCallback((newCuadrante) => {
+    setCloudStatus('saving');
+    try {
+      localStorage.setItem('cgt_fcc_cuadrante_avanzado', JSON.stringify(newCuadrante));
+    } catch (e) {
+      console.warn("Error guardando cuadrante:", e);
+    }
+    setTimeout(() => setCloudStatus('synced'), 350);
+  }, []);
+
+  const getDayKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+  const currentMonthDays = new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 0).getDate();
+  const firstDayOfMonth = new Date(currentDate.getFullYear(), currentDate.getMonth(), 1).getDay();
+  const startOffset = firstDayOfMonth === 0 ? 6 : firstDayOfMonth - 1;
+
+  // Festivos oficiales de la Comunitat Valenciana y Valencia Capital 2026 + San Martín de Porres (3 de noviembre)
+  const festivosOficiales2026 = {
+    '2026-01-01': 'Año Nuevo',
+    '2026-01-06': 'Epifanía / Reyes',
+    '2026-01-22': 'San Vicente Mártir',
+    '2026-03-19': 'San José',
+    '2026-04-03': 'Viernes Santo',
+    '2026-04-06': 'Lunes de Pascua',
+    '2026-04-13': 'San Vicente Ferrer',
+    '2026-05-01': 'Fiesta del Trabajo',
+    '2026-06-24': 'San Juan',
+    '2026-08-15': 'Asunción de la Virgen',
+    '2026-10-09': 'Día C. Valenciana',
+    '2026-10-12': 'Fiesta Nacional',
+    '2026-11-03': 'San Martín de Porres',
+    '2026-12-08': 'Inmaculada Concepción',
+    '2026-12-25': 'Navidad'
   };
 
-  const totales = {
-    descanso: dias.filter(d => d === 'D').length,
-    superior: dias.filter(d => d === 'CS').length
+  const obtenerNombreFestivo = (date, key) => {
+    const mesDia = `${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+    if (mesDia === '11-03') return 'San Martín de Porres';
+    return festivosOficiales2026[key] || null;
   };
 
-  const { diferenciaDiariaFinal } = calcularDiferenciaDiaria(
-    perfil.categoria, 
-    perfil.categoriaSuperior, 
-    perfil.bivolante, 
-    perfil.porter
+  const esDomingoOFestivoOficial = (date, key) => {
+    return date.getDay() === 0 || Boolean(obtenerNombreFestivo(date, key));
+  };
+
+  const obtenerPrecioHoraExtra = (turno, catName) => {
+    const mapaTurno = tablaHorasExtras2026[turno] || tablaHorasExtras2026["DIA"];
+    if (mapaTurno[catName]) return mapaTurno[catName];
+    const lower = (catName || '').toLowerCase();
+    if (lower.includes('conductor')) return mapaTurno["Conductor/a"] || { normal: 17.32, festiva: 19.97 };
+    if (lower.includes('espec')) return mapaTurno["Peón especialista"] || { normal: 17.13, festiva: 19.54 };
+    if (lower.includes('oficial 1')) return mapaTurno["Oficial primera"] || { normal: 19.61, festiva: 22.40 };
+    if (lower.includes('oficial 2')) return mapaTurno["Oficial segunda"] || { normal: 19.01, festiva: 21.86 };
+    if (lower.includes('oficial 3')) return mapaTurno["Oficial tercera"] || { normal: 18.48, festiva: 21.06 };
+    if (lower.includes('jefe')) return mapaTurno["Jefe de equipo"] || { normal: 19.84, festiva: 22.67 };
+    return mapaTurno["Peón"] || { normal: 16.83, festiva: 19.28 };
+  };
+
+  // Diferencia diaria automática tomando el Perfil del trabajador en modalidad Días Sueltos (sin plus mensual de recogida)
+  const { diferenciaDiariaFinal: diffDiariaPerfil } = calcularDiferenciaDiaria(
+    perfil.categoria,
+    perfil.categoriaSuperior,
+    perfil.bivolante,
+    perfil.porter,
+    true
   );
 
-  const totalEurosEstimado = diferenciaDiariaFinal * totales.superior;
+  const preciosHoraBase = obtenerPrecioHoraExtra(perfil.turno, perfil.categoria);
+
+  const calcularEurosDia = (dayData) => {
+    if (!dayData || !['trabajo', 'festivo', 'cat_superior'].includes(dayData.estado)) return 0;
+    let total = 0;
+
+    // Solo suma diferencia de categoría superior en días laborables normales (nunca en domingo/festivo)
+    if (dayData.estado === 'cat_superior') {
+      total += diffDiariaPerfil;
+    }
+
+    const catActiva = dayData.estado === 'cat_superior' ? perfil.categoriaSuperior : perfil.categoria;
+    const catHoras = obtenerPrecioHoraExtra(perfil.turno, catActiva);
+    if (catHoras) {
+      // Concepto 1403: Horas Extras Normales
+      total += (Number(dayData.horasExtraNormales) || 0) * catHoras.normal;
+      // Concepto 1405: Horas Extras Festivas (si el estado es 'festivo' y no se ha editado, son 7h por defecto)
+      const hFestivas = dayData.horasExtraFestivas !== undefined
+        ? Number(dayData.horasExtraFestivas)
+        : (dayData.estado === 'festivo' ? 7 : 0);
+      total += hFestivas * catHoras.festiva;
+    }
+
+    return total;
+  };
+
+  const handleTapDay = (date, key) => {
+    const permiteFestivo = esDomingoOFestivoOficial(date, key);
+    // En domingo o festivo oficial NO se incluye 'cat_superior' (se cobra como festivo/horas festivas, no como diferencia de día suelto)
+    // Entre semana NO se incluye 'festivo'
+    const ordenEstados = permiteFestivo
+      ? ['sin_marcar', 'festivo', 'trabajo', 'descanso', 'vacaciones', 'baja']
+      : ['sin_marcar', 'trabajo', 'cat_superior', 'descanso', 'vacaciones', 'baja'];
+
+    const currentData = cuadrante[key] || { estado: 'sin_marcar', horasExtraNormales: 0, horasExtraFestivas: 0 };
+    const idxActual = ordenEstados.indexOf(currentData.estado);
+    const nextEstado = ordenEstados[(idxActual + 1) % ordenEstados.length];
+
+    const newCuadrante = { ...cuadrante };
+    if (nextEstado === 'sin_marcar') {
+      delete newCuadrante[key];
+      setSelectedDay(null);
+    } else {
+      // Si pasa a 'festivo', cargamos automáticamente 7 horas extras festivas (Concepto 1405)
+      let nuevasHorasFestivas = currentData.horasExtraFestivas || 0;
+      if (nextEstado === 'festivo') {
+        nuevasHorasFestivas = 7;
+      } else if (currentData.estado === 'festivo' && nextEstado !== 'festivo') {
+        nuevasHorasFestivas = 0;
+      }
+
+      newCuadrante[key] = {
+        ...currentData,
+        estado: nextEstado,
+        horasExtraNormales: permiteFestivo && nextEstado === 'festivo' ? 0 : (currentData.horasExtraNormales || 0),
+        horasExtraFestivas: permiteFestivo ? nuevasHorasFestivas : 0
+      };
+      setSelectedDay(key);
+    }
+    setCuadrante(newCuadrante);
+    saveToStorage(newCuadrante);
+  };
+
+  const handleUpdateHorasDia = (key, field, value) => {
+    const currentData = cuadrante[key] || { estado: 'trabajo', horasExtraNormales: 0, horasExtraFestivas: 0 };
+    const newCuadrante = {
+      ...cuadrante,
+      [key]: {
+        ...currentData,
+        [field]: Math.max(0, value)
+      }
+    };
+    setCuadrante(newCuadrante);
+    saveToStorage(newCuadrante);
+  };
+
+  const handleClearMonth = () => {
+    const newCuadrante = { ...cuadrante };
+    for (let i = 1; i <= currentMonthDays; i++) {
+      const dKey = getDayKey(new Date(currentDate.getFullYear(), currentDate.getMonth(), i));
+      delete newCuadrante[dKey];
+    }
+    setCuadrante(newCuadrante);
+    setSelectedDay(null);
+    saveToStorage(newCuadrante);
+  };
+
+  const getMonthStats = () => {
+    let domingosFestivosTrabajados = 0;
+    let diasCatSuperior = 0;
+    let eurosCatSuperior = 0;
+    let horasNormalesMes = 0;
+    let eurosHorasNormales = 0;
+    let horasFestivasMes = 0;
+    let eurosHorasFestivas = 0;
+
+    for (let i = 1; i <= currentMonthDays; i++) {
+      const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), i);
+      const key = getDayKey(date);
+      const data = cuadrante[key];
+      const esDomFest = esDomingoOFestivoOficial(date, key);
+
+      if (data && ['trabajo', 'festivo', 'cat_superior'].includes(data.estado)) {
+        if (esDomFest || data.estado === 'festivo') domingosFestivosTrabajados++;
+        if (data.estado === 'cat_superior') {
+          diasCatSuperior++;
+          eurosCatSuperior += diffDiariaPerfil;
+        }
+
+        const catActiva = data.estado === 'cat_superior' ? perfil.categoriaSuperior : perfil.categoria;
+        const catHoras = obtenerPrecioHoraExtra(perfil.turno, catActiva);
+
+        const hNorm = Number(data.horasExtraNormales) || 0;
+        const hFest = data.horasExtraFestivas !== undefined
+          ? Number(data.horasExtraFestivas)
+          : (data.estado === 'festivo' ? 7 : 0);
+
+        horasNormalesMes += hNorm;
+        eurosHorasNormales += hNorm * catHoras.normal;
+
+        horasFestivasMes += hFest;
+        eurosHorasFestivas += hFest * catHoras.festiva;
+      }
+    }
+
+    const totalExtrasMes = eurosCatSuperior + eurosHorasNormales + eurosHorasFestivas;
+    return {
+      domingosFestivosTrabajados,
+      diasCatSuperior,
+      eurosCatSuperior,
+      horasNormalesMes,
+      eurosHorasNormales,
+      horasFestivasMes,
+      eurosHorasFestivas,
+      totalExtrasMes
+    };
+  };
+
+  const stats = getMonthStats();
+  const diasSemana = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+  const activeDayObj = selectedDay ? cuadrante[selectedDay] : null;
+  const selectedDateObj = selectedDay ? new Date(`${selectedDay}T12:00:00`) : null;
+  const selectedPermiteFestivo = selectedDateObj && selectedDay ? esDomingoOFestivoOficial(selectedDateObj, selectedDay) : false;
+  const selectedNombreFestivo = selectedDateObj && selectedDay ? obtenerNombreFestivo(selectedDateObj, selectedDay) : null;
 
   return (
     <div className="animate-fadeIn space-y-6 w-full print-area">
-      <div className="bg-white p-4 md:p-8 rounded-2xl shadow-sm border border-gray-100">
-        <div className="flex justify-between items-center border-b border-gray-100 pb-3 mb-4">
-          <h2 className="text-lg md:text-xl font-bold flex items-center text-gray-800"><Calendar className="mr-2 text-orange-600 w-5 h-5 md:w-6 md:h-6" /> Cuadrante Diferencias (Días Sueltos)</h2>
-          <button onClick={() => setDias(Array(31).fill('null'))} className="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded-lg font-bold hover:bg-red-100 transition flex items-center"><Trash2 className="w-4 h-4 mr-1"/> Borrar</button>
-        </div>
-        
-        <div className="flex flex-wrap gap-1.5 md:gap-2 justify-center mb-5 no-print text-[10px] md:text-xs font-bold">
-          <span className="bg-gray-100 text-gray-500 border border-gray-200 px-2 py-1 rounded-md">Trabajo Normal</span>
-          <span className="bg-green-50 text-green-900 border border-green-200 px-2 py-1 rounded-md">(D) Descanso</span>
-          <span className="bg-purple-50 text-purple-900 border border-purple-200 px-2 py-1 rounded-md">(CS) Cat. Superior</span>
-        </div>
-
-        <div className="grid grid-cols-7 gap-1.5 md:gap-3 mb-6">
-          {['L', 'M', 'X', 'J', 'V', 'S', 'D'].map(d => <div key={d} className="text-center font-bold text-gray-400 text-xs mb-1">{d}</div>)}
-          {dias.map((estado, i) => (
-            <button key={i} onClick={() => toggleDia(i)} className={`aspect-square rounded-xl flex flex-col items-center justify-center font-black text-base md:text-lg transition-all transform active:scale-95 shadow-sm border ${
-              estado === 'D' ? 'bg-green-500 text-white border-green-600' : 
-              estado === 'CS' ? 'bg-purple-600 text-white border-purple-700' : 
-              'bg-gray-50 text-gray-500 border-gray-200 hover:bg-gray-100'
-            }`}>
-              <span>{i + 1}</span>
-              {estado !== 'null' && <span className="text-[8px] md:text-[9px] opacity-90 -mt-1 font-bold">{estado}</span>}
-            </button>
-          ))}
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 border-t border-gray-100 pt-4 text-center font-bold max-w-md mx-auto">
-           <div className="bg-green-600 text-white p-3 rounded-xl shadow-sm"><span className="text-[10px] block uppercase mb-1">Descansos</span><span className="text-2xl font-mono font-black">{totales.descanso}</span></div>
-           <div className="bg-purple-600 text-white p-3 rounded-xl shadow-sm"><span className="text-[10px] block uppercase mb-1">C. Superior</span><span className="text-2xl font-mono font-black">{totales.superior}</span></div>
-        </div>
-
-        {totales.superior > 0 && (
-          <div className="mt-6 bg-gradient-to-r from-purple-700 to-indigo-800 p-4 md:p-6 rounded-xl border border-purple-900 shadow-lg text-white flex flex-col sm:flex-row justify-between items-center gap-4 no-invert">
-            <div className="text-center sm:text-left">
-              <h4 className="font-black flex items-center justify-center sm:justify-start text-xs md:text-sm uppercase tracking-widest text-purple-200 mb-1.5"><Info className="w-4 h-4 mr-1.5" /> Deuda Acumulada</h4>
-              <p className="text-sm text-gray-200 font-medium">Has marcado {totales.superior} días sueltos de {perfil.categoriaSuperior}.</p>
-              {(perfil.bivolante || perfil.porter) && (
-                <p className="text-[11px] text-emerald-300 mt-2 font-black uppercase tracking-wider bg-black/20 inline-block px-2.5 py-1 rounded-md border border-white/10">
-                  <span className="mr-1">✓</span> Incluye plus de vehículos: {perfil.bivolante ? 'Bivolante' : ''}{perfil.bivolante && perfil.porter ? ' y ' : ''}{perfil.porter ? 'Porter' : ''}
-                </p>
-              )}
+      <div className="bg-white p-4 md:p-6 rounded-2xl shadow-sm border border-gray-100 relative overflow-hidden">
+        <div className="flex flex-wrap justify-between items-center border-b border-gray-100 pb-4 mb-4 gap-2">
+          <div>
+            <h2 className="text-lg md:text-xl font-black flex items-center text-gray-800">
+              <Calendar className="mr-2.5 text-blue-600 w-6 h-6" /> Mi Cuadrante Rápido 2026 (Comunitat Valenciana)
+            </h2>
+            <p className="text-xs text-gray-500 font-bold mt-0.5">
+              Incluye festivos oficiales CV, Valencia y 3 de Noviembre (San Martín de Porres). En festivo/domingo se abona como Festivo (7h) y no como diferencia de categoría.
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <div className={`flex items-center text-[10px] md:text-xs font-bold px-3 py-1.5 rounded-full transition-colors ${cloudStatus === 'saving' ? 'bg-blue-50 text-blue-600 border border-blue-200' : 'bg-green-50 text-green-700 border border-green-200'}`}>
+              {cloudStatus === 'saving' ? <><Cloud className="w-3.5 h-3.5 mr-1 animate-pulse" /> Guardando...</> : <><Save className="w-3.5 h-3.5 mr-1" /> Guardado</>}
             </div>
-            <div className="text-3xl md:text-4xl font-black font-mono tracking-tighter bg-black/30 px-5 py-3 rounded-xl border border-white/10 shadow-inner">
-              +{totalEurosEstimado.toFixed(2)} €
+            <button onClick={handleClearMonth} className="text-xs bg-red-50 text-red-600 px-3 py-1.5 rounded-full font-bold hover:bg-red-100 transition flex items-center">
+              <Trash2 className="w-3.5 h-3.5 mr-1" /> Limpiar Mes
+            </button>
+          </div>
+        </div>
+
+        {/* Resumen automático conectado a Mi Perfil */}
+        <div className="bg-purple-50 border border-purple-200 rounded-xl p-3 mb-5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-2 text-xs">
+          <div className="flex items-center gap-2 text-purple-900 font-medium">
+            <User className="w-4 h-4 text-purple-600 shrink-0" />
+            <span>
+              Perfil: <strong>{perfil.categoria}</strong> ➔ Sup: <strong>{perfil.categoriaSuperior}</strong>
+              {(perfil.bivolante || perfil.porter) ? ` (+ ${perfil.bivolante ? 'Bivolante' : ''} ${perfil.porter ? 'Porter' : ''})` : ''}
+            </span>
+          </div>
+          <div className="flex flex-wrap gap-1.5 shrink-0">
+            <span className="bg-purple-700 text-white font-mono font-black px-2 py-1 rounded-lg text-[10px]">
+              Cat. Sup (Laborable): +{diffDiariaPerfil.toFixed(2)}€/día
+            </span>
+            <span className="bg-amber-600 text-white font-mono font-black px-2 py-1 rounded-lg text-[10px]">
+              Festivo (7h): +{(preciosHoraBase.festiva * 7).toFixed(2)}€
+            </span>
+          </div>
+        </div>
+
+        {/* Selector de mes y leyenda de toques */}
+        <div className="flex flex-col lg:flex-row justify-between items-center mb-5 gap-3">
+          <div className="flex bg-gray-100 p-1.5 rounded-xl border border-gray-200 w-full lg:w-auto justify-between items-center">
+            <button aria-label="Mes anterior" onClick={() => { setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() - 1, 1)); setSelectedDay(null); }} className="p-2 hover:bg-white rounded-lg transition shadow-sm"><ChevronRight className="w-5 h-5 rotate-180" /></button>
+            <span className="font-black text-gray-800 uppercase tracking-widest text-xs md:text-sm px-6">
+              {currentDate.toLocaleString('es-ES', { month: 'long', year: 'numeric' })}
+            </span>
+            <button aria-label="Mes siguiente" onClick={() => { setCurrentDate(new Date(currentDate.getFullYear(), currentDate.getMonth() + 1, 1)); setSelectedDay(null); }} className="p-2 hover:bg-white rounded-lg transition shadow-sm"><ChevronRight className="w-5 h-5" /></button>
+          </div>
+
+          <div className="flex flex-wrap gap-1.5 justify-center text-[10px] font-black">
+            <span className="bg-blue-500 text-white px-2.5 py-1 rounded-lg shadow-sm">💼 Trabajo</span>
+            <span className="bg-amber-500 text-white px-2.5 py-1 rounded-lg shadow-sm">⭐ Festivo (Dom/Fest CV: 7h)</span>
+            <span className="bg-purple-600 text-white px-2.5 py-1 rounded-lg shadow-sm">🟣 Cat. Sup. (L-S)</span>
+            <span className="bg-emerald-500 text-white px-2.5 py-1 rounded-lg shadow-sm">🛋️ Descanso</span>
+            <span className="bg-cyan-600 text-white px-2.5 py-1 rounded-lg shadow-sm">🌴 Vacaciones</span>
+            <span className="bg-red-500 text-white px-2.5 py-1 rounded-lg shadow-sm">🏥 Baja/IT</span>
+          </div>
+        </div>
+
+        {/* Cuadrícula del mes */}
+        <div className="grid grid-cols-7 gap-1.5 md:gap-2.5 mb-4">
+          {diasSemana.map((d, idx) => (
+            <div key={d} className={`text-center text-[10px] md:text-xs font-black uppercase tracking-wider pb-1 ${idx === 6 ? 'text-red-500' : 'text-gray-400'}`}>
+              {d}
+            </div>
+          ))}
+          
+          {Array.from({ length: startOffset }).map((_, i) => <div key={`empty-${i}`} className="p-2 rounded-xl bg-gray-50/40 border border-dashed border-gray-100"></div>)}
+
+          {Array.from({ length: currentMonthDays }).map((_, i) => {
+            const date = new Date(currentDate.getFullYear(), currentDate.getMonth(), i + 1);
+            const key = getDayKey(date);
+            const data = cuadrante[key];
+            const estado = data?.estado || 'sin_marcar';
+            const eurosDia = data ? calcularEurosDia(data) : 0;
+            const isSelected = selectedDay === key;
+            const nombreFestivo = obtenerNombreFestivo(date, key);
+            const esDomOFest = esDomingoOFestivoOficial(date, key);
+
+            let bgColor = esDomOFest
+              ? 'bg-red-50/50 border-red-200 text-gray-700 hover:bg-red-50'
+              : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100';
+            let labelTexto = nombreFestivo
+              ? (nombreFestivo === 'San Martín de Porres' ? 'San Martín' : nombreFestivo)
+              : (date.getDay() === 0 ? 'Dom' : '');
+
+            if (estado === 'trabajo') {
+              bgColor = 'bg-blue-500 border-blue-600 text-white shadow-sm';
+              labelTexto = '💼 Trab.';
+            } else if (estado === 'festivo') {
+              bgColor = 'bg-amber-500 border-amber-600 text-white shadow-sm';
+              const hFest = data?.horasExtraFestivas !== undefined ? data.horasExtraFestivas : 7;
+              labelTexto = `⭐ Fest (${hFest}h)`;
+            } else if (estado === 'cat_superior') {
+              bgColor = 'bg-purple-600 border-purple-700 text-white shadow-md';
+              labelTexto = '🟣 Cat.Sup';
+            } else if (estado === 'descanso') {
+              bgColor = 'bg-emerald-500 border-emerald-600 text-white shadow-sm';
+              labelTexto = '🛋️ Libre';
+            } else if (estado === 'vacaciones') {
+              bgColor = 'bg-cyan-600 border-cyan-700 text-white shadow-sm';
+              labelTexto = '🌴 Vacac.';
+            } else if (estado === 'baja') {
+              bgColor = 'bg-red-500 border-red-600 text-white shadow-sm';
+              labelTexto = '🏥 Baja';
+            }
+
+            return (
+              <button
+                key={key}
+                onClick={() => handleTapDay(date, key)}
+                title={nombreFestivo ? `Festivo Oficial: ${nombreFestivo}` : undefined}
+                className={`relative p-1.5 md:p-2.5 rounded-xl border flex flex-col items-center justify-center transition-all min-h-[64px] md:min-h-[82px] select-none active:scale-95 ${bgColor} ${isSelected ? 'ring-2 ring-offset-1 ring-slate-900 z-20' : ''}`}
+              >
+                <span className={`text-base md:text-xl font-black leading-none ${estado === 'sin_marcar' && esDomOFest ? 'text-red-600' : ''}`}>
+                  {date.getDate()}
+                </span>
+                <span className={`text-[8px] md:text-[10px] font-extrabold uppercase tracking-tighter mt-1 truncate w-full px-0.5 ${estado === 'sin_marcar' ? (esDomOFest ? 'text-red-500' : 'text-gray-400') : 'text-white'}`}>
+                  {labelTexto}
+                </span>
+                {eurosDia > 0 && (
+                  <span className="absolute -top-1.5 -right-1 bg-slate-900 text-emerald-400 border border-emerald-500/40 text-[8px] md:text-[9px] font-black px-1.5 py-0.5 rounded-full shadow">
+                    +{eurosDia.toFixed(2)}€
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+
+        {/* Barra rápida de Horas Extras (1403 Normales entre semana / 1405 Festivas en Domingo o Festivo) */}
+        {selectedDay && activeDayObj && ['trabajo', 'festivo', 'cat_superior'].includes(activeDayObj.estado) && (
+          <div className="bg-slate-900 p-4 rounded-2xl shadow-lg text-white animate-fadeIn border border-slate-700 mt-3 flex flex-col sm:flex-row items-center justify-between gap-4 no-invert">
+            <div className="text-center sm:text-left">
+              <span className="text-[10px] font-black uppercase tracking-widest text-purple-400 block">
+                Día {selectedDay.split('-').reverse().join('/')}
+                {selectedNombreFestivo ? ` (${selectedNombreFestivo})` : selectedPermiteFestivo ? ' (Domingo)' : ''} •{' '}
+                {activeDayObj.estado === 'cat_superior'
+                  ? `Cat. Superior (${perfil.categoriaSuperior})`
+                  : activeDayObj.estado === 'festivo'
+                    ? 'Festivo Trabajado (7h por defecto)'
+                    : 'Jornada Trabajada'}
+              </span>
+              <p className="text-xs text-slate-300 mt-0.5">
+                {selectedPermiteFestivo
+                  ? 'En domingo o festivo oficial no se abonan diferencias de día suelto; se abona como Festivo / 1405 H. Extras Festivas'
+                  : 'Día laborable entre semana: añade tus Horas Extras Normales / Terceras (1403)'}{' '}
+                <span className="text-emerald-400 font-mono font-bold">(Día: +{calcularEurosDia(activeDayObj).toFixed(2)} €)</span>
+              </p>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-3">
+              {/* Entre semana: Horas Extras Normales (Concepto 1403) */}
+              {!selectedPermiteFestivo && (
+                <div className="flex items-center bg-slate-800 rounded-xl p-1.5 border border-slate-700">
+                  <span className="text-[10px] font-bold text-slate-200 px-2 uppercase">
+                    1403 H. Normales ({preciosHoraBase.normal.toFixed(2)}€/h):
+                  </span>
+                  <button aria-label="Restar hora extra normal" onClick={() => handleUpdateHorasDia(selectedDay, 'horasExtraNormales', clampNumber((Number(activeDayObj.horasExtraNormales) || 0) - 1, 0, 16))} className="w-8 h-8 bg-slate-700 hover:bg-slate-600 rounded-lg font-black text-sm">-</button>
+                  <span className="w-9 text-center font-mono font-black text-sm text-white">{activeDayObj.horasExtraNormales || 0}h</span>
+                  <button aria-label="Sumar hora extra normal" onClick={() => handleUpdateHorasDia(selectedDay, 'horasExtraNormales', clampNumber((Number(activeDayObj.horasExtraNormales) || 0) + 1, 0, 16))} className="w-8 h-8 bg-purple-600 hover:bg-purple-500 rounded-lg font-black text-sm">+</button>
+                </div>
+              )}
+
+              {/* En Domingo o Festivo Nacional: Horas Extras Festivas (Concepto 1405) */}
+              {selectedPermiteFestivo && (
+                <div className="flex items-center bg-slate-800 rounded-xl p-1.5 border border-amber-500/40">
+                  <span className="text-[10px] font-bold text-amber-300 px-2 uppercase">
+                    1405 H. Festivas ({preciosHoraBase.festiva.toFixed(2)}€/h):
+                  </span>
+                  <button
+                    aria-label="Restar hora extra festiva"
+                    onClick={() => {
+                      const actual = activeDayObj.horasExtraFestivas !== undefined ? Number(activeDayObj.horasExtraFestivas) : (activeDayObj.estado === 'festivo' ? 7 : 0);
+                      handleUpdateHorasDia(selectedDay, 'horasExtraFestivas', clampNumber(actual - 1, 0, 16));
+                    }}
+                    className="w-8 h-8 bg-slate-700 hover:bg-slate-600 rounded-lg font-black text-sm"
+                  >-</button>
+                  <span className="w-9 text-center font-mono font-black text-sm text-amber-300">
+                    {activeDayObj.horasExtraFestivas !== undefined ? activeDayObj.horasExtraFestivas : (activeDayObj.estado === 'festivo' ? 7 : 0)}h
+                  </span>
+                  <button
+                    aria-label="Sumar hora extra festiva"
+                    onClick={() => {
+                      const actual = activeDayObj.horasExtraFestivas !== undefined ? Number(activeDayObj.horasExtraFestivas) : (activeDayObj.estado === 'festivo' ? 7 : 0);
+                      handleUpdateHorasDia(selectedDay, 'horasExtraFestivas', clampNumber(actual + 1, 0, 16));
+                    }}
+                    className="w-8 h-8 bg-amber-600 hover:bg-amber-500 rounded-lg font-black text-sm"
+                  >+</button>
+                </div>
+              )}
             </div>
           </div>
         )}
+      </div>
+
+      {/* Desglose mensual idéntico a la nómina (1403 Normales, 1405 Festivas, Cat. Superior y Total) */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <div className="bg-white border border-gray-100 rounded-2xl p-5 flex items-center shadow-sm">
+          <div className="bg-blue-50 p-3.5 rounded-xl text-blue-600 mr-4"><Timer className="w-6 h-6" /></div>
+          <div>
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">1403 H. Extras Normales</p>
+            <p className="text-xl font-black text-gray-800 leading-none mt-1">
+              {stats.horasNormalesMes}h <span className="text-sm font-mono text-blue-600">(+{stats.eurosHorasNormales.toFixed(2)}€)</span>
+            </p>
+            <span className="text-[9px] text-gray-400 font-semibold block mt-0.5">Horas terceras entre semana</span>
+          </div>
+        </div>
+
+        <div className="bg-white border border-gray-100 rounded-2xl p-5 flex items-center shadow-sm">
+          <div className="bg-amber-50 p-3.5 rounded-xl text-amber-600 mr-4"><Calendar className="w-6 h-6" /></div>
+          <div>
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">1405 H. Extras Festivas</p>
+            <p className="text-xl font-black text-gray-800 leading-none mt-1">
+              {stats.horasFestivasMes}h <span className="text-sm font-mono text-amber-600">(+{stats.eurosHorasFestivas.toFixed(2)}€)</span>
+            </p>
+            <span className="text-[9px] text-gray-400 font-semibold block mt-0.5">{stats.domingosFestivosTrabajados} dom/fest trabajados</span>
+          </div>
+        </div>
+
+        <div className="bg-white border border-gray-100 rounded-2xl p-5 flex items-center shadow-sm">
+          <div className="bg-purple-50 p-3.5 rounded-xl text-purple-600 mr-4"><Award className="w-6 h-6" /></div>
+          <div>
+            <p className="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Días Cat. Superior</p>
+            <p className="text-xl font-black text-gray-800 leading-none mt-1">
+              {stats.diasCatSuperior}d <span className="text-sm font-mono text-purple-600">(+{stats.eurosCatSuperior.toFixed(2)}€)</span>
+            </p>
+            <span className="text-[9px] text-gray-400 font-semibold block mt-0.5">Diferencias días sueltos</span>
+          </div>
+        </div>
+
+        <div className="bg-gradient-to-br from-emerald-600 to-green-700 rounded-2xl p-5 flex items-center shadow-md text-white no-invert">
+          <div className="bg-white/20 p-3.5 rounded-xl text-white mr-4"><Euro className="w-6 h-6" /></div>
+          <div>
+            <p className="text-[10px] font-black text-emerald-100 uppercase tracking-widest">Total Extras Nómina</p>
+            <p className="text-2xl font-black text-white font-mono leading-none mt-1">+{stats.totalExtrasMes.toFixed(2)} €</p>
+            <span className="text-[9px] text-emerald-100 font-semibold block mt-0.5">Suma 1403 + 1405 + Dif.</span>
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -871,29 +1201,25 @@ const CalculadoraDiferencias = memo(function CalculadoraDiferencias({ perfil, vo
   const [dias, setDias] = useState(1);
   const [bivolante, setBivolante] = useState(perfil.bivolante);
   const [porter, setPorter] = useState(perfil.porter);
+  const [diasSueltosRecogida, setDiasSueltosRecogida] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [draftResult, setDraftResult] = useState('');
   const [copied, setCopied] = useState(false);
   const claimRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     if (voiceCalcData) {
       if (voiceCalcData.categoriaBase) setCategoriaPropia(voiceCalcData.categoriaBase);
       if (voiceCalcData.categoriaSuperior) setCategoriaSuperior(voiceCalcData.categoriaSuperior);
-      if (voiceCalcData.dias !== null && voiceCalcData.dias !== undefined) setDias(voiceCalcData.dias);
+      if (voiceCalcData.dias !== null && voiceCalcData.dias !== undefined) setDias(clampNumber(voiceCalcData.dias, 1, 31));
       if (voiceCalcData.bivolante !== null && voiceCalcData.bivolante !== undefined) setBivolante(voiceCalcData.bivolante);
       if (voiceCalcData.porter !== null && voiceCalcData.porter !== undefined) setPorter(voiceCalcData.porter);
     }
   }, [voiceCalcData]);
 
   const categorias = Object.keys(tablaSalarial2026);
-
-  const { diferenciaDiariaFinal, diferenciaConceptos } = calcularDiferenciaDiaria(
-    categoriaPropia, 
-    categoriaSuperior, 
-    bivolante, 
-    porter
-  );
+  const { diferenciaDiariaFinal, diferenciaConceptos } = calcularDiferenciaDiaria(categoriaPropia, categoriaSuperior, bivolante, porter, diasSueltosRecogida);
 
   let plusesVehiculos = [];
   if (bivolante) plusesVehiculos.push({ nombre: 'Plus Bivolante', importe: plusesVehiculos2026.bivolante });
@@ -905,28 +1231,31 @@ const CalculadoraDiferencias = memo(function CalculadoraDiferencias({ perfil, vo
     if (!apiKey) { onConfigureIA(); return; }
     setIsGenerating(true);
     setDraftResult('');
+    abortRef.current = new AbortController();
     let textoVehiculos = '';
     if (bivolante && porter) textoVehiculos = ' y asumiendo la conducción de vehículos Bivolante y Porter';
     else if (bivolante) textoVehiculos = ' y asumiendo la conducción de vehículo Bivolante';
     else if (porter) textoVehiculos = ' y asumiendo la conducción de vehículo Porter';
 
-    const prompt = `Redacta una carta formal muy concisa dirigida al Departamento de Recursos Humanos de FCC Medio Ambiente (Valencia). Soy un trabajador con la categoría base de "${categoriaPropia}". Durante ${dias} días he estado realizando funciones correspondientes a la categoría superior de "${categoriaSuperior}"${textoVehiculos}. Solicito formalmente el abono de la diferencia salarial correspondiente a estos días, que asciende a un total estimado de ${totalReclamar.toFixed(2)} euros brutos, calculados usando la tabla salarial actualizada de 2026. La carta debe tener espacios para que yo rellene mi Nombre, DNI y Firma. No incluyas explicaciones tuyas, solo el texto de la carta listo para imprimir. Asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT.`;
-    const response = await callGeminiAPI(prompt, apiKey);
-    setDraftResult(response);
+    const notaRecogida = diasSueltosRecogida ? ' (calculado en modalidad de días sueltos en recogida, sin incluir el plus mensual de recogida)' : '';
+
+    const prompt = `Redacta una carta formal muy concisa dirigida al Departamento de Recursos Humanos de FCC Medio Ambiente (Valencia). Soy un trabajador con la categoría base de "${categoriaPropia}". Durante ${dias} días he estado realizando funciones correspondientes a la categoría superior de "${categoriaSuperior}"${textoVehiculos}${notaRecogida}. Solicito formalmente el abono de la diferencia salarial correspondiente a estos días, que asciende a un total estimado de ${totalReclamar.toFixed(2)} euros brutos, calculados usando la tabla salarial actualizada de 2026. La carta debe tener espacios para que yo rellene mi Nombre, DNI y Firma. No incluyas explicaciones tuyas, solo el texto de la carta listo para imprimir. Asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT.`;
+    const response = await callGeminiAPI(prompt, apiKey, [], abortRef.current.signal);
+    if (response !== "Operación cancelada por el usuario.") {
+      setDraftResult(response);
+    }
     setIsGenerating(false);
   };
 
   const handleDownloadPDF = () => {
     if (window.html2pdf && claimRef.current) {
-      const element = claimRef.current;
-      const opt = {
-        margin:       10,
-        filename:     `Reclamacion_Diferencias_CGT_${categoriaSuperior.replace(/ /g, '_')}.pdf`,
-        image:        { type: 'jpeg', quality: 0.98 },
-        html2canvas:  { scale: 2 },
-        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
-      };
-      window.html2pdf().set(opt).from(element).save();
+      window.html2pdf().set({
+        margin: 10,
+        filename: `Reclamacion_Diferencias_CGT_${categoriaSuperior.replace(/ /g, '_')}.pdf`,
+        image: { type: 'jpeg', quality: 0.98 },
+        html2canvas: { scale: 2 },
+        jsPDF: { unit: 'mm', format: 'a4', orientation: 'portrait' }
+      }).from(claimRef.current).save();
     } else {
       window.print();
     }
@@ -935,11 +1264,11 @@ const CalculadoraDiferencias = memo(function CalculadoraDiferencias({ perfil, vo
   return (
     <div className="animate-fadeIn space-y-6 w-full print-area">
       <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl shadow-sm flex items-start gap-3 no-print">
-         <Shield className="w-6 h-6 text-blue-600 shrink-0 mt-0.5" />
-         <div>
-            <h4 className="font-bold text-blue-900 text-sm uppercase tracking-wider">Aviso Sindical</h4>
-            <p className="text-xs text-blue-800 mt-1">Es recomendable <strong>consultar con un delegado</strong> de CGT para hacer una revisión conjunta de tus cálculos antes de registrar cualquier documento por registro de entrada.</p>
-         </div>
+        <Shield className="w-6 h-6 text-blue-600 shrink-0 mt-0.5" />
+        <div>
+          <h4 className="font-bold text-blue-900 text-sm uppercase tracking-wider">Aviso Sindical</h4>
+          <p className="text-xs text-blue-800 mt-1">Es recomendable <strong>consultar con un delegado</strong> de CGT para hacer una revisión conjunta de tus cálculos antes de registrar cualquier documento por registro de entrada.</p>
+        </div>
       </div>
 
       <div className="bg-white p-5 md:p-6 rounded-2xl shadow-sm border border-gray-100 no-print">
@@ -965,12 +1294,12 @@ const CalculadoraDiferencias = memo(function CalculadoraDiferencias({ perfil, vo
             </div>
 
             <div className="pt-2 border-t border-gray-200 mt-2">
-                <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide mt-2">Días Realizados en Cat. Superior</label>
-                <div className="flex items-center shadow-sm rounded-xl overflow-hidden border border-gray-200 bg-white w-full">
-                  <button onClick={() => setDias(Math.max(1, dias - 1))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600 hover:bg-gray-200">-</button>
-                  <input type="number" min="1" className="w-full h-12 text-center border-x border-gray-200 text-xl font-bold focus:outline-none" value={dias} onChange={(e) => setDias(parseInt(e.target.value) || 0)} />
-                  <button onClick={() => setDias(dias + 1)} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600 hover:bg-gray-200">+</button>
-                </div>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase tracking-wide mt-2">Días Realizados en Cat. Superior (1 a 31)</label>
+              <div className="flex items-center shadow-sm rounded-xl overflow-hidden border border-gray-200 bg-white w-full">
+                <button aria-label="Restar un día" onClick={() => setDias(clampNumber(dias - 1, 1, 31))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600 hover:bg-gray-200">-</button>
+                <input type="number" min="1" max="31" className="w-full h-12 text-center border-x border-gray-200 text-xl font-bold focus:outline-none" value={dias} onChange={(e) => setDias(clampNumber(e.target.value, 1, 31))} />
+                <button aria-label="Sumar un día" onClick={() => setDias(clampNumber(dias + 1, 1, 31))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600 hover:bg-gray-200">+</button>
+              </div>
             </div>
 
             <div className="pt-4 border-t border-gray-200 space-y-3">
@@ -987,6 +1316,13 @@ const CalculadoraDiferencias = memo(function CalculadoraDiferencias({ perfil, vo
                 <span className="text-sm font-bold text-gray-800 flex flex-1 justify-between items-center">
                   <span>He conducido Porter</span>
                   <span className="bg-red-100 text-red-700 font-bold text-[10px] px-2 py-1 rounded-md">+{plusesVehiculos2026.porter.toFixed(2)} €/día</span>
+                </span>
+              </label>
+              <label className="flex items-center space-x-3 cursor-pointer p-4 bg-amber-50/70 border border-amber-200 rounded-xl shadow-sm w-full">
+                <input type="checkbox" className="w-5 h-5 text-amber-600 rounded" checked={diasSueltosRecogida} onChange={(e) => setDiasSueltosRecogida(e.target.checked)} />
+                <span className="text-sm font-bold text-gray-800 flex flex-1 flex-wrap justify-between items-center gap-1">
+                  <span>Días sueltos trabajados en recogida</span>
+                  <span className="bg-amber-100 text-amber-800 font-bold text-[10px] px-2 py-1 rounded-md">Sin Plus Recogida</span>
                 </span>
               </label>
             </div>
@@ -1035,9 +1371,16 @@ const CalculadoraDiferencias = memo(function CalculadoraDiferencias({ perfil, vo
               </div>
             </div>
             {totalReclamar !== 0 && (
-              <button onClick={handleGenerateClaim} disabled={isGenerating || totalReclamar < 0} className={`w-full p-4 rounded-xl shadow-md font-bold flex items-center justify-center text-white ${apiKey ? 'bg-gradient-to-r from-purple-600 to-indigo-600' : 'bg-gradient-to-r from-yellow-600 to-amber-600 animate-pulse'}`}>
-                {isGenerating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> ✨ Redactando escrito...</> : apiKey ? <><FileText className="w-5 h-5 mr-2" /> ✨ Redactar Escrito para RRHH</> : <><Key className="w-5 h-5 mr-2" /> ⚠️ Configura tu Clave IA</>}
-              </button>
+              <div className="space-y-2">
+                <button onClick={handleGenerateClaim} disabled={isGenerating || totalReclamar < 0} className={`w-full p-4 rounded-xl shadow-md font-bold flex items-center justify-center text-white ${apiKey ? 'bg-gradient-to-r from-purple-600 to-indigo-600' : 'bg-gradient-to-r from-yellow-600 to-amber-600 animate-pulse'}`}>
+                  {isGenerating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> ✨ Redactando escrito...</> : apiKey ? <><FileText className="w-5 h-5 mr-2" /> ✨ Redactar Escrito para RRHH</> : <><Key className="w-5 h-5 mr-2" /> ⚠️ Configura tu Clave IA</>}
+                </button>
+                {isGenerating && (
+                  <button onClick={() => { abortRef.current?.abort(); setIsGenerating(false); }} className="w-full py-2 bg-red-100 text-red-700 font-bold text-xs rounded-xl hover:bg-red-200 transition">
+                    Cancelar redacción
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>
@@ -1073,6 +1416,7 @@ const CalculadoraHorasExtras = memo(function CalculadoraHorasExtras({ perfil, ap
   const [horasFestivas, setHorasFestivas] = useState(0);
   const [isGenerating, setIsGenerating] = useState(false);
   const [draftResult, setDraftResult] = useState('');
+  const abortRef = useRef(null);
 
   const handleTurnoChange = (t) => { setTurno(t); localStorage.setItem('cgt_turno_horas', t); };
   const handleCategoriaChange = (e) => { setCategoria(e.target.value); localStorage.setItem('cgt_cat_horas', e.target.value); };
@@ -1087,9 +1431,12 @@ const CalculadoraHorasExtras = memo(function CalculadoraHorasExtras({ perfil, ap
     if (!apiKey) { onConfigureIA(); return; }
     setIsGenerating(true);
     setDraftResult('');
+    abortRef.current = new AbortController();
     const prompt = `Redacta una carta formal muy concisa dirigida al Departamento de Recursos Humanos de FCC Medio Ambiente (Valencia). Soy un trabajador con la categoría de "${categoria}" en el turno de "${turno}". He realizado un total de ${horasNormales} horas extras en día normal y ${horasFestivas} horas extras en día festivo/descanso. Solicito formalmente el abono correspondiente a estas horas extras, que asciende a un total estimado de ${total.toFixed(2)} euros brutos, basándome en los precios del Anexo III del convenio colectivo de FCC Zona Norte de Valencia para el año 2026. La carta debe tener espacios para que yo rellene mi Nombre, DNI y Firma. No incluyas explicaciones tuyas, solo el texto de la carta listo para imprimir. Asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT.`;
-    const response = await callGeminiAPI(prompt, apiKey);
-    setDraftResult(response);
+    const response = await callGeminiAPI(prompt, apiKey, [], abortRef.current.signal);
+    if (response !== "Operación cancelada por el usuario.") {
+      setDraftResult(response);
+    }
     setIsGenerating(false);
   };
 
@@ -1114,17 +1461,17 @@ const CalculadoraHorasExtras = memo(function CalculadoraHorasExtras({ perfil, ap
             <div className="pt-2">
               <label className="block text-xs font-bold text-gray-700 mb-2 uppercase flex justify-between"><span>Hrs. Extras Normales</span><span className="text-purple-600 bg-purple-100 px-2 py-0.5 rounded-md">{precios.normal.toFixed(2)} €/h</span></label>
               <div className="flex items-center shadow-sm rounded-xl overflow-hidden border border-gray-200 bg-white">
-                <button onClick={() => setHorasNormales(Math.max(0, horasNormales - 1))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">-</button>
-                <input type="number" min="0" className="w-full h-12 text-center text-xl font-bold focus:outline-none" value={horasNormales} onChange={(e) => setHorasNormales(parseFloat(e.target.value) || 0)} />
-                <button onClick={() => setHorasNormales(horasNormales + 1)} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">+</button>
+                <button aria-label="Restar hora normal" onClick={() => setHorasNormales(clampNumber(horasNormales - 1, 0, 150, true))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">-</button>
+                <input type="number" min="0" max="150" className="w-full h-12 text-center text-xl font-bold focus:outline-none" value={horasNormales} onChange={(e) => setHorasNormales(clampNumber(e.target.value, 0, 150, true))} />
+                <button aria-label="Sumar hora normal" onClick={() => setHorasNormales(clampNumber(horasNormales + 1, 0, 150, true))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">+</button>
               </div>
             </div>
             <div className="pt-2">
               <label className="block text-xs font-bold text-gray-700 mb-2 uppercase flex justify-between"><span>Hrs. Extras Festivas</span><span className="text-red-600 bg-red-100 px-2 py-0.5 rounded-md">{precios.festiva.toFixed(2)} €/h</span></label>
               <div className="flex items-center shadow-sm rounded-xl overflow-hidden border border-gray-200 bg-white">
-                <button onClick={() => setHorasFestivas(Math.max(0, horasFestivas - 1))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">-</button>
-                <input type="number" min="0" className="w-full h-12 text-center text-xl font-bold focus:outline-none" value={horasFestivas} onChange={(e) => setHorasFestivas(parseFloat(e.target.value) || 0)} />
-                <button onClick={() => setHorasFestivas(horasFestivas + 1)} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">+</button>
+                <button aria-label="Restar hora festiva" onClick={() => setHorasFestivas(clampNumber(horasFestivas - 1, 0, 150, true))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">-</button>
+                <input type="number" min="0" max="150" className="w-full h-12 text-center text-xl font-bold focus:outline-none" value={horasFestivas} onChange={(e) => setHorasFestivas(clampNumber(e.target.value, 0, 150, true))} />
+                <button aria-label="Sumar hora festiva" onClick={() => setHorasFestivas(clampNumber(horasFestivas + 1, 0, 150, true))} className="bg-gray-100 w-14 h-12 font-bold text-2xl text-gray-600">+</button>
               </div>
             </div>
           </div>
@@ -1138,14 +1485,36 @@ const CalculadoraHorasExtras = memo(function CalculadoraHorasExtras({ perfil, ap
               </div>
             </div>
             {total > 0 && (
-              <button onClick={handleGenerateClaim} disabled={isGenerating} className={`w-full p-4 rounded-xl shadow-md font-bold flex items-center justify-center text-white ${apiKey ? 'bg-gradient-to-r from-purple-600 to-indigo-600' : 'bg-gradient-to-r from-yellow-600 to-amber-600 animate-pulse'}`}>
-                {isGenerating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> Redactando...</> : apiKey ? <><FileText className="w-5 h-5 mr-2" /> Redactar Escrito para RRHH</> : <><Key className="w-5 h-5 mr-2" /> Configura tu Clave IA</>}
-              </button>
+              <div className="space-y-2">
+                <button onClick={handleGenerateClaim} disabled={isGenerating} className={`w-full p-4 rounded-xl shadow-md font-bold flex items-center justify-center text-white ${apiKey ? 'bg-gradient-to-r from-purple-600 to-indigo-600' : 'bg-gradient-to-r from-yellow-600 to-amber-600 animate-pulse'}`}>
+                  {isGenerating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin" /> Redactando...</> : apiKey ? <><FileText className="w-5 h-5 mr-2" /> Redactar Escrito para RRHH</> : <><Key className="w-5 h-5 mr-2" /> Configura tu Clave IA</>}
+                </button>
+                {isGenerating && (
+                  <button onClick={() => { abortRef.current?.abort(); setIsGenerating(false); }} className="w-full py-2 bg-red-100 text-red-700 font-bold text-xs rounded-xl hover:bg-red-200 transition">
+                    Cancelar redacción
+                  </button>
+                )}
+              </div>
             )}
           </div>
         </div>
       </div>
       {draftResult && <div className="bg-purple-50 p-6 rounded-2xl shadow-inner mt-4 print:bg-white"><div className="text-sm md:text-base font-serif bg-white p-6 rounded-xl border border-purple-100">{draftResult}</div></div>}
+    </div>
+  );
+});
+
+const PagaCard = memo(function PagaCard({ titulo, subtitulo, importe, notaEspecial }) {
+  return (
+    <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 md:p-5 shadow-sm">
+      <div className="flex justify-between items-center mb-4">
+        <div className="flex items-center gap-3">
+          <div className="bg-white border border-gray-200 p-2.5 rounded-xl text-green-600"><Gift className="w-6 h-6" /></div>
+          <div><h4 className="font-black text-gray-800 text-sm md:text-base leading-tight">{titulo}</h4><p className="text-[10px] text-gray-500 font-bold uppercase">{subtitulo}</p></div>
+        </div>
+      </div>
+      <div className="bg-white rounded-xl p-4 flex justify-between items-center border border-gray-100"><span className="text-xs font-bold text-gray-400 uppercase">Total percibir</span><span className="font-mono text-xl font-black text-green-600">{importe.toFixed(2)} €</span></div>
+      {notaEspecial && <div className="mt-4 bg-blue-50 text-blue-800 text-[10px] font-bold py-2.5 px-3 rounded-lg border border-blue-200 text-center uppercase">{notaEspecial}</div>}
     </div>
   );
 });
@@ -1156,11 +1525,11 @@ const PagasExtrasPluses = memo(function PagasExtrasPluses({ perfil }) {
   const [anios, setAnios] = useState(0);
 
   useEffect(() => {
-    if(perfil.fechaIngreso){
+    if (perfil.fechaIngreso) {
       const ingreso = new Date(perfil.fechaIngreso);
       const hoy = new Date();
       let a = hoy.getFullYear() - ingreso.getFullYear();
-      if(hoy.getMonth() < ingreso.getMonth() || (hoy.getMonth() === ingreso.getMonth() && hoy.getDate() < ingreso.getDate())) a--;
+      if (hoy.getMonth() < ingreso.getMonth() || (hoy.getMonth() === ingreso.getMonth() && hoy.getDate() < ingreso.getDate())) a--;
       setAnios(Math.max(0, a));
     }
   }, [perfil.fechaIngreso]);
@@ -1191,51 +1560,32 @@ const PagasExtrasPluses = memo(function PagasExtrasPluses({ perfil }) {
           </div>
           {subTab === 'pagas' && (
             <div>
-              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase">Años Antigüedad</label>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase">Años Antigüedad (0 a 55)</label>
               <div className="flex items-center shadow-sm rounded-xl overflow-hidden border border-gray-200 bg-white">
-                <button onClick={() => setAnios(Math.max(0, anios - 1))} className="bg-gray-100 w-14 h-[50px] font-bold text-2xl text-gray-600">-</button>
-                <input type="number" min="0" className="w-full h-[50px] text-center border-x border-gray-200 text-xl font-bold focus:outline-none" value={anios} onChange={(e) => setAnios(parseInt(e.target.value) || 0)} />
-                <button onClick={() => setAnios(anios + 1)} className="bg-gray-100 w-14 h-[50px] font-bold text-2xl text-gray-600">+</button>
+                <button aria-label="Restar año antigüedad" onClick={() => setAnios(clampNumber(anios - 1, 0, 55))} className="bg-gray-100 w-14 h-[50px] font-bold text-2xl text-gray-600">-</button>
+                <input type="number" min="0" max="55" className="w-full h-[50px] text-center border-x border-gray-200 text-xl font-bold focus:outline-none" value={anios} onChange={(e) => setAnios(clampNumber(e.target.value, 0, 55))} />
+                <button aria-label="Sumar año antigüedad" onClick={() => setAnios(clampNumber(anios + 1, 0, 55))} className="bg-gray-100 w-14 h-[50px] font-bold text-2xl text-gray-600">+</button>
               </div>
             </div>
           )}
         </div>
 
         {subTab === 'pagas' ? (
-          <div className="space-y-4 animate-fadeIn">
-             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                <PagaCard titulo="Paga de Beneficios" subtitulo="(Abonada en Marzo)" importe={totalPaga} notaEspecial="El importe del 2026 se cobra al año siguiente." />
-                <PagaCard titulo="Paga de Verano" subtitulo="(Abonada en Junio/Julio)" importe={totalPaga} />
-                <PagaCard titulo="Paga de San Martín de Porres" subtitulo="(Abonada en Noviembre)" importe={totalPaga} />
-                <PagaCard titulo="Paga de Navidad" subtitulo="(Abonada en Diciembre)" importe={totalPaga} />
-             </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-fadeIn">
+            <PagaCard titulo="Paga de Beneficios" subtitulo="(Abonada en Marzo)" importe={totalPaga} notaEspecial="El importe del 2026 se cobra al año siguiente." />
+            <PagaCard titulo="Paga de Verano" subtitulo="(Abonada en Junio/Julio)" importe={totalPaga} />
+            <PagaCard titulo="Paga de San Martín de Porres" subtitulo="(Abonada en Noviembre)" importe={totalPaga} />
+            <PagaCard titulo="Paga de Navidad" subtitulo="(Abonada en Diciembre)" importe={totalPaga} />
           </div>
         ) : (
-          <div className="space-y-4 animate-fadeIn">
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div className="bg-orange-50 border border-orange-200 rounded-2xl p-5 shadow-sm">
-                <h4 className="font-black text-gray-800 text-lg mb-2">Plus de Fallas 2026</h4>
-                <div className="bg-white rounded-xl p-4 flex justify-between items-center border border-orange-100"><span className="text-sm font-bold text-gray-500">Importe Único</span><span className="font-mono text-2xl font-black text-orange-600">{plusFallas.toFixed(2)} €</span></div>
-              </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 animate-fadeIn">
+            <div className="bg-orange-50 border border-orange-200 rounded-2xl p-5 shadow-sm">
+              <h4 className="font-black text-gray-800 text-lg mb-2">Plus de Fallas 2026</h4>
+              <div className="bg-white rounded-xl p-4 flex justify-between items-center border border-orange-100"><span className="text-sm font-bold text-gray-500">Importe Único</span><span className="font-mono text-2xl font-black text-orange-600">{plusFallas.toFixed(2)} €</span></div>
             </div>
           </div>
         )}
       </div>
-    </div>
-  );
-});
-
-const PagaCard = memo(function PagaCard({ titulo, subtitulo, importe, notaEspecial }) {
-  return (
-    <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 md:p-5 shadow-sm">
-       <div className="flex justify-between items-center mb-4">
-          <div className="flex items-center gap-3">
-             <div className="bg-white border border-gray-200 p-2.5 rounded-xl text-green-600"><Gift className="w-6 h-6" /></div>
-             <div><h4 className="font-black text-gray-800 text-sm md:text-base leading-tight">{titulo}</h4><p className="text-[10px] text-gray-500 font-bold uppercase">{subtitulo}</p></div>
-          </div>
-       </div>
-       <div className="bg-white rounded-xl p-4 flex justify-between items-center border border-gray-100"><span className="text-xs font-bold text-gray-400 uppercase">Total percibir</span><span className="font-mono text-xl font-black text-green-600">{importe.toFixed(2)} €</span></div>
-       {notaEspecial && <div className="mt-4 bg-blue-50 text-blue-800 text-[10px] font-bold py-2.5 px-3 rounded-lg border border-blue-200 text-center uppercase">{notaEspecial}</div>}
     </div>
   );
 });
@@ -1246,10 +1596,11 @@ const RetencionesIRPF = memo(function RetencionesIRPF({ apiKey, onConfigureIA })
   const [baseIRPF, setBaseIRPF] = useState(1539.56);
   const [irpfPorcentaje, setIrpfPorcentaje] = useState(13.00);
   const [primaConvenio, setPrimaConvenio] = useState(1.07);
-
   const [archivoAdjunto, setArchivoAdjunto] = useState(null);
+  const [errorArchivo, setErrorArchivo] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [resultadoAuditoria, setResultadoAuditoria] = useState('');
+  const abortRef = useRef(null);
 
   const contingenciasComunes = baseSS * 0.047; 
   const mei = baseSS * 0.0012; 
@@ -1262,8 +1613,16 @@ const RetencionesIRPF = memo(function RetencionesIRPF({ apiKey, onConfigureIA })
   const handleFileChange = (e) => {
     const uploadedFile = e.target.files[0];
     if (uploadedFile) {
+      const check = validarArchivoSeguro(uploadedFile);
+      if (!check.valido) {
+        setArchivoAdjunto(null);
+        setErrorArchivo(check.error);
+        e.target.value = '';
+        return;
+      }
+      setErrorArchivo('');
       const reader = new FileReader();
-      reader.onloadend = () => { setArchivoAdjunto({ data: reader.result.split(',')[1], mimeType: uploadedFile.type }); };
+      reader.onloadend = () => { setArchivoAdjunto({ data: reader.result.split(',')[1], mimeType: uploadedFile.type, name: uploadedFile.name }); };
       reader.readAsDataURL(uploadedFile);
     }
   };
@@ -1273,18 +1632,18 @@ const RetencionesIRPF = memo(function RetencionesIRPF({ apiKey, onConfigureIA })
     if (!archivoAdjunto) return;
     setIsAnalyzing(true);
     setResultadoAuditoria('');
-    const prompt = `Actúas como un asesor fiscal experto en nóminas en España en el AÑO VIGENTE 2026. He adjuntado un documento de mi nómina mensual de la empresa FCC Medio Ambiente (Valencia Zona Norte). Tu tarea es auditar únicamente el apartado de RETENCIONES Y DEDUCCIONES basándote en la normativa y TABLAS VIGENTES DEL AÑO 2026 (Queda prohibido citar o referir a 2024 o años anteriores).
-
-Por favor, estructura tu respuesta en Markdown de la siguiente forma:
-- 🔍 **DATOS LEÍDOS DE LA NÓMINA (AÑO 2026)**: Indica el Total Devengado, las Bases de Cotización (Seguridad Social e IRPF) y los porcentajes que ha aplicado la empresa.
-- 🧮 **AUDITORÍA DE SEGURIDAD SOCIAL 2026**: Comprueba si los porcentajes aplicados por ley al trabajador son correctos sobre esa base (4,70% Contingencias Comunes, 1,65% Desempleo+FP, y M.E.I. vigente en 2026).
-- 💶 **ANÁLISIS DE IRPF**: Comprueba el porcentaje de IRPF aplicado según la proyección de ingresos de 2026.
-- ⚠️ **CONCLUSIÓN**: Dime claramente si mi nómina está bien calculada o si me han retenido de más/de menos.
-
-Termina tu respuesta SIEMPRE despidiéndote EXACTAMENTE con esta firma y nada más:
-"Un saludo, **JUAN CARLOS**, DELEGADO SINDICAL CGT"`;
-    const response = await callGeminiAPI(prompt, apiKey, [archivoAdjunto]);
-    setResultadoAuditoria(response);
+    abortRef.current = new AbortController();
+    const prompt = `Actúas como un asesor fiscal experto en nóminas en España en el AÑO VIGENTE 2026. He adjuntado un documento de mi nómina mensual de la empresa FCC Medio Ambiente (Valencia Zona Norte). Audita únicamente el apartado de RETENCIONES Y DEDUCCIONES basándote en la normativa de 2026.
+Estructura en Markdown:
+- 🔍 **DATOS LEÍDOS DE LA NÓMINA (AÑO 2026)**
+- 🧮 **AUDITORÍA DE SEGURIDAD SOCIAL 2026** (4,70% CC, 1,65% Desempleo+FP, 0,12% M.E.I.)
+- 💶 **ANÁLISIS DE IRPF**
+- ⚠️ **CONCLUSIÓN**
+Termina con: "Un saludo, **JUAN CARLOS**, DELEGADO SINDICAL CGT"`;
+    const response = await callGeminiAPI(prompt, apiKey, [archivoAdjunto], abortRef.current.signal);
+    if (response !== "Operación cancelada por el usuario.") {
+      setResultadoAuditoria(response);
+    }
     setIsAnalyzing(false);
   };
 
@@ -1295,35 +1654,35 @@ Termina tu respuesta SIEMPRE despidiéndote EXACTAMENTE con esta firma y nada m�
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 md:gap-8 mb-8">
           <div className="lg:col-span-5 space-y-4 bg-gray-50 p-5 rounded-xl border border-gray-100 shadow-inner">
             <h3 className="text-sm font-bold text-gray-800 uppercase flex items-center border-b border-gray-200 pb-2 mb-4"><Calculator className="w-4 h-4 mr-2 text-blue-600" /> Inserta tus Bases</h3>
-            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase">1. Total Devengado (Bruto)</label><input type="number" step="0.01" className="w-full p-3 bg-white border border-gray-300 rounded-xl text-sm font-bold focus:outline-none" value={devengos} onChange={(e) => setDevengos(parseFloat(e.target.value) || 0)} /></div>
-            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase">2. Base Cotización SS</label><input type="number" step="0.01" className="w-full p-3 bg-white border border-gray-300 rounded-xl text-sm font-bold focus:outline-none" value={baseSS} onChange={(e) => setBaseSS(parseFloat(e.target.value) || 0)} /></div>
-            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase">3. Base Sujeta a IRPF</label><input type="number" step="0.01" className="w-full p-3 bg-white border border-gray-300 rounded-xl text-sm font-bold focus:outline-none" value={baseIRPF} onChange={(e) => setBaseIRPF(parseFloat(e.target.value) || 0)} /></div>
-            <div className="pt-2 border-t border-gray-200 mt-2"><label className="block text-xs font-bold text-blue-800 mb-1.5 uppercase">% IRPF Aplicado</label><input type="number" step="0.01" className="w-full p-3 text-center bg-blue-50 border border-blue-200 text-lg font-black text-blue-900 rounded-xl focus:outline-none" value={irpfPorcentaje} onChange={(e) => setIrpfPorcentaje(parseFloat(e.target.value) || 0)} /></div>
-            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase mt-3">Primas o Seguros</label><input type="number" step="0.01" className="w-full p-2 bg-white border border-gray-300 rounded-lg text-sm font-bold" value={primaConvenio} onChange={(e) => setPrimaConvenio(parseFloat(e.target.value) || 0)} /></div>
+            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase">1. Total Devengado (Bruto)</label><input type="number" min="0" max="20000" step="0.01" className="w-full p-3 bg-white border border-gray-300 rounded-xl text-sm font-bold" value={devengos} onChange={(e) => setDevengos(clampNumber(e.target.value, 0, 20000, true))} /></div>
+            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase">2. Base Cotización SS</label><input type="number" min="0" max="20000" step="0.01" className="w-full p-3 bg-white border border-gray-300 rounded-xl text-sm font-bold" value={baseSS} onChange={(e) => setBaseSS(clampNumber(e.target.value, 0, 20000, true))} /></div>
+            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase">3. Base Sujeta a IRPF</label><input type="number" min="0" max="20000" step="0.01" className="w-full p-3 bg-white border border-gray-300 rounded-xl text-sm font-bold" value={baseIRPF} onChange={(e) => setBaseIRPF(clampNumber(e.target.value, 0, 20000, true))} /></div>
+            <div className="pt-2 border-t border-gray-200 mt-2"><label className="block text-xs font-bold text-blue-800 mb-1.5 uppercase">% IRPF Aplicado (0% a 47%)</label><input type="number" min="0" max="47" step="0.01" className="w-full p-3 text-center bg-blue-50 border border-blue-200 text-lg font-black text-blue-900 rounded-xl" value={irpfPorcentaje} onChange={(e) => setIrpfPorcentaje(clampNumber(e.target.value, 0, 47, true))} /></div>
+            <div><label className="block text-xs font-bold text-gray-700 mb-1.5 uppercase mt-3">Primas o Seguros</label><input type="number" min="0" max="1000" step="0.01" className="w-full p-2 bg-white border border-gray-300 rounded-lg text-sm font-bold" value={primaConvenio} onChange={(e) => setPrimaConvenio(clampNumber(e.target.value, 0, 1000, true))} /></div>
           </div>
           <div className="lg:col-span-7 bg-[#fdfdfd] border-2 border-dashed border-gray-300 rounded-xl p-6 relative shadow-md">
-             <h3 className="font-black text-gray-800 uppercase tracking-widest text-sm mb-6 border-b border-gray-200 pb-2">Desglose de Deducciones 2026</h3>
-             <div className="space-y-5">
-               <div>
-                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Cotización Seguridad Social</p>
-                 <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 space-y-2">
-                   <div className="flex justify-between text-xs md:text-sm"><span className="text-gray-600">Trab. Cont. Comunes (4.70%)</span><span className="font-mono font-bold text-red-600">-{contingenciasComunes.toFixed(2)} €</span></div>
-                   <div className="flex justify-between text-xs md:text-sm"><span className="text-gray-600">Trab. Desem + F Profes (1.65%)</span><span className="font-mono font-bold text-red-600">-{desempleoFP.toFixed(2)} €</span></div>
-                   <div className="flex justify-between text-xs md:text-sm"><span className="text-gray-600">M.E.I. (0.12%)</span><span className="font-mono font-bold text-red-600">-{mei.toFixed(2)} €</span></div>
-                 </div>
-               </div>
-               <div>
-                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Impuesto Renta F.P.</p>
-                 <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 flex justify-between text-sm items-center"><span className="text-blue-900 font-semibold">Retención a Cta. IRPF ({irpfPorcentaje.toFixed(2)}%)</span><span className="font-mono font-black text-red-700 text-lg">-{importeIRPF.toFixed(2)} €</span></div>
-               </div>
-               <div className="border-t border-gray-300 pt-4 mt-6">
-                 <div className="flex justify-between text-sm mb-2"><span className="font-bold text-gray-600">(B) Total Retenciones:</span><span className="font-mono font-bold text-gray-800">{totalDeducciones.toFixed(2)} €</span></div>
-                 <div className="flex justify-between items-end bg-green-50 p-4 rounded-xl border border-green-200 mt-4 shadow-sm">
-                   <div><span className="font-black text-green-900 text-sm uppercase">Líquido a Percibir</span></div>
-                   <span className="font-mono font-black text-green-700 text-3xl md:text-4xl tracking-tighter">{liquidoPercibir.toFixed(2)} €</span>
-                 </div>
-               </div>
-             </div>
+            <h3 className="font-black text-gray-800 uppercase tracking-widest text-sm mb-6 border-b border-gray-200 pb-2">Desglose de Deducciones 2026</h3>
+            <div className="space-y-5">
+              <div>
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Cotización Seguridad Social</p>
+                <div className="bg-gray-50 border border-gray-100 rounded-lg p-3 space-y-2">
+                  <div className="flex justify-between text-xs md:text-sm"><span className="text-gray-600">Trab. Cont. Comunes (4.70%)</span><span className="font-mono font-bold text-red-600">-{contingenciasComunes.toFixed(2)} €</span></div>
+                  <div className="flex justify-between text-xs md:text-sm"><span className="text-gray-600">Trab. Desem + F Profes (1.65%)</span><span className="font-mono font-bold text-red-600">-{desempleoFP.toFixed(2)} €</span></div>
+                  <div className="flex justify-between text-xs md:text-sm"><span className="text-gray-600">M.E.I. (0.12%)</span><span className="font-mono font-bold text-red-600">-{mei.toFixed(2)} €</span></div>
+                </div>
+              </div>
+              <div>
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-2">Impuesto Renta F.P.</p>
+                <div className="bg-blue-50 border border-blue-100 rounded-lg p-3 flex justify-between text-sm items-center"><span className="text-blue-900 font-semibold">Retención a Cta. IRPF ({irpfPorcentaje.toFixed(2)}%)</span><span className="font-mono font-black text-red-700 text-lg">-{importeIRPF.toFixed(2)} €</span></div>
+              </div>
+              <div className="border-t border-gray-300 pt-4 mt-6">
+                <div className="flex justify-between text-sm mb-2"><span className="font-bold text-gray-600">(B) Total Retenciones:</span><span className="font-mono font-bold text-gray-800">{totalDeducciones.toFixed(2)} €</span></div>
+                <div className="flex justify-between items-end bg-green-50 p-4 rounded-xl border border-green-200 mt-4 shadow-sm">
+                  <div><span className="font-black text-green-900 text-sm uppercase">Líquido a Percibir</span></div>
+                  <span className="font-mono font-black text-green-700 text-3xl md:text-4xl tracking-tighter">{liquidoPercibir.toFixed(2)} €</span>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1331,17 +1690,24 @@ Termina tu respuesta SIEMPRE despidiéndote EXACTAMENTE con esta firma y nada m�
         <h3 className="text-lg font-bold border-b border-gray-100 pb-3 mb-4 flex items-center text-purple-900"><Sparkles className="mr-3 text-purple-600 w-6 h-6 animate-pulse" /> Auditoría IA de Retenciones 2026</h3>
         <div className="flex flex-col md:flex-row gap-6">
           <div className="w-full md:w-1/2">
-             <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 bg-gray-50 hover:border-blue-500 transition-colors cursor-pointer relative flex flex-col items-center justify-center text-center h-[200px]">
-                <input type="file" accept="image/*,application/pdf" onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
-                <Upload className="w-12 h-12 text-gray-400 mb-3" /><p className="text-sm font-bold text-gray-700">{archivoAdjunto ? '¡Documento cargado!' : 'Sube tu nómina (Foto o PDF)'}</p>
-             </div>
+            <div className="border-2 border-dashed border-gray-300 rounded-xl p-8 bg-gray-50 hover:border-blue-500 transition-colors cursor-pointer relative flex flex-col items-center justify-center text-center h-[200px]">
+              <input type="file" aria-label="Subir nómina para auditar retenciones" accept="image/jpeg,image/png,image/webp,application/pdf" onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full" />
+              <Upload className="w-12 h-12 text-gray-400 mb-3" />
+              <p className="text-sm font-bold text-gray-700">{archivoAdjunto ? `¡Cargado: ${archivoAdjunto.name}!` : 'Sube tu nómina (Foto o PDF - Máx. 10 MB)'}</p>
+            </div>
+            {errorArchivo && <p className="text-xs text-red-600 font-bold mt-2 flex items-center gap-1"><AlertCircle className="w-4 h-4 shrink-0" /> {errorArchivo}</p>}
           </div>
           <div className="w-full md:w-1/2 flex flex-col">
             <div className="bg-gradient-to-br from-blue-900 to-indigo-900 text-white p-6 rounded-xl shadow-lg relative flex-1 flex flex-col justify-center border border-blue-800 no-invert">
               <h4 className="text-blue-300 font-black mb-3 uppercase tracking-widest text-xs z-10">Asesor Fiscal Virtual (2026)</h4>
-              <button onClick={ejecutarAuditoria} disabled={isAnalyzing || !archivoAdjunto} className={`w-full p-4 rounded-xl shadow-lg font-bold text-white mt-auto z-10 ${apiKey ? 'bg-blue-600 hover:bg-blue-500' : 'bg-yellow-600 hover:bg-yellow-500 animate-pulse text-yellow-50'}`}>
+              <button onClick={ejecutarAuditoria} disabled={isAnalyzing || !archivoAdjunto} className={`w-full p-4 rounded-xl shadow-lg font-bold text-white mt-auto z-10 ${apiKey ? 'bg-blue-600 hover:bg-blue-500' : 'bg-yellow-600 animate-pulse'}`}>
                 {isAnalyzing ? "Auditando retenciones 2026..." : apiKey ? "Auditar mis Retenciones 2026" : "Necesitas la Clave IA"}
               </button>
+              {isAnalyzing && (
+                <button onClick={() => { abortRef.current?.abort(); setIsAnalyzing(false); }} className="mt-2 w-full py-2 bg-red-600/80 hover:bg-red-600 text-white font-bold text-xs rounded-lg z-10">
+                  Cancelar auditoría
+                </button>
+              )}
             </div>
           </div>
         </div>
@@ -1353,27 +1719,36 @@ Termina tu respuesta SIEMPRE despidiéndote EXACTAMENTE con esta firma y nada m�
 
 const CalculadoraAuditoria = memo(({ apiKey, onConfigureIA, voiceCommandToAudit }) => {
   const [archivos, setArchivos] = useState([]);
+  const [errorArchivo, setErrorArchivo] = useState('');
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [resultado, setResultado] = useState('');
+  const abortRef = useRef(null);
 
   const handleFileChange = (e) => {
     const files = Array.from(e.target.files);
     if (!files.length) return;
-    
-    Promise.all(files.map(file => {
-      return new Promise((resolve) => {
-        const reader = new FileReader();
-        reader.onloadend = () => resolve({ data: reader.result.split(',')[1], mimeType: file.type, name: file.name });
-        reader.readAsDataURL(file);
-      });
-    })).then(newFiles => {
-      setArchivos(prev => [...prev, ...newFiles]);
-    });
+    setErrorArchivo('');
+    const archivosValidos = [];
+    for (const f of files) {
+      const check = validarArchivoSeguro(f);
+      if (!check.valido) {
+        setErrorArchivo(check.error);
+      } else {
+        archivosValidos.push(f);
+      }
+    }
+    if (!archivosValidos.length) {
+      e.target.value = '';
+      return;
+    }
+    Promise.all(archivosValidos.map(file => new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve({ data: reader.result.split(',')[1], mimeType: file.type, name: file.name });
+      reader.readAsDataURL(file);
+    }))).then(newFiles => setArchivos(prev => [...prev, ...newFiles].slice(0, 6)));
   };
 
-  const eliminarArchivo = (index) => {
-    setArchivos(prev => prev.filter((_, i) => i !== index));
-  };
+  const eliminarArchivo = (index) => setArchivos(prev => prev.filter((_, i) => i !== index));
 
   useEffect(() => {
     if (voiceCommandToAudit && archivos.length > 0 && !isAnalyzing) {
@@ -1386,33 +1761,17 @@ const CalculadoraAuditoria = memo(({ apiKey, onConfigureIA, voiceCommandToAudit 
     if (!archivos.length) return;
     setIsAnalyzing(true);
     setResultado('');
-    
+    abortRef.current = new AbortController();
     const consultaUsuario = peticionVoz ? `\n\nEl trabajador ha indicado por voz lo siguiente: "${peticionVoz}"` : '';
+    const prompt = `Actúas como un experto auditor laboral de CGT en el AÑO VIGENTE 2026. Analiza los documentos o nóminas adjuntas de FCC Medio Ambiente (Valencia Zona Norte) usando las TABLAS SALARIALES DEFINITIVAS DE 2026.
+Si hay varias nóminas o se solicita calcular vacaciones${consultaUsuario}, aplica el Artículo 30 del Convenio FCC Zona Norte (promedio del trimestre anterior excluyendo horas extras, transporte y dietas).
+Si es una auditoría mensual, comprueba Salario Base 2026, Penosidad, Asistencia, Convenio, Transporte, Vehículos (Bivolante 2,91€, Porter 1,46€), Horas Extras y Seguridad Social.
+Indica en formato Markdown claro el resultado detallado.`;
 
-    const prompt = `Actúas como un experto auditor laboral de CGT en el AÑO VIGENTE 2026. Analiza los documentos o nóminas adjuntas de FCC Medio Ambiente (Valencia Zona Norte).
-
-REGLA OBLIGATORIA: Debes auditar utilizando ÚNICAMENTE Y EXCLUSIVAMENTE LAS TABLAS SALARIALES DEFINITIVAS DEL AÑO 2026 del Convenio Colectivo de FCC Zona Norte Valencia.
-Menciona explícitamente en la introducción que el análisis se realiza con las TABLAS OFICIALES VIGENTES DE 2026. Queda ESTRICTAMENTE PROHIBIDO citar tablas de 2024 o años anteriores.
-
-INSTRUCCIÓN ESPECIAL VACACIONES (SI HAY VARIAS NÓMINAS O SE PIDE):
-Si detectas más de una nómina adjunta (ej: 3 nóminas) o el trabajador solicita "calcular vacaciones"${consultaUsuario}, debes aplicar el Artículo 30 del Convenio FCC Zona Norte. La retribución de vacaciones se calcula hallando el PROMEDIO del salario percibido por todos los conceptos durante el TRIMESTRE ANTERIOR a su disfrute. 
-EXCEPCIONES (NO SE INCLUYEN): Horas extraordinarias, plus productividad, prestaciones de Seguridad Social (IT), plus transporte, dietas, ayuda a discapacitados, plus de actividad de mercados/playas/contenedores (Art. 19), plus turnicidad/prolongación, ni ayudas sociales.
-SÍ SE INCLUYEN: Salario Base, Antigüedad, Plus Penoso, Plus Nocturno, Plus Convenio, Plus Asistencia, Plus Reconversión Recogida y el Plus de Actividad Recogida Domiciliaria (Art. 17).
-Muestra el cálculo paso a paso sumando las bases válidas de cada mes aportado y divídelas entre 3.
-
-SI ES UNA AUDITORÍA NORMAL DE UN SOLO MES:
-Comprueba punto por punto usando las cifras de 2026:
-1. Salario Base 2026 según categoría (Ej: Peón 31,35 €/día, Conductor 32,19 €/día).
-2. Plus Penosidad 2026 (25% del base).
-3. Plus Asistencia 2026, Plus Convenio 2026, Plus Transporte 2026.
-4. Plus Bivolante (2,91 €/día) o Porter (1,46 €/día).
-5. Horas extras 2026 (Anexo III).
-6. Cotizaciones a la Seguridad Social (4,70% CC, 1,65% Desempleo, M.E.I. vigente en 2026 e IRPF).
-
-Indica en formato Markdown claro el resultado detallado de la petición.`;
-
-    const res = await callGeminiAPI(prompt, apiKey, archivos);
-    setResultado(res);
+    const res = await callGeminiAPI(prompt, apiKey, archivos, abortRef.current.signal);
+    if (res !== "Operación cancelada por el usuario.") {
+      setResultado(res);
+    }
     setIsAnalyzing(false);
   };
 
@@ -1421,37 +1780,47 @@ Indica en formato Markdown claro el resultado detallado de la petición.`;
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
         <h2 className="text-xl font-bold border-b border-gray-100 pb-3 mb-4 flex items-center text-purple-900"><FileSearch className="mr-3 text-purple-600 w-6 h-6 animate-pulse" /> Auditoría Completa de Nómina IA (Tablas 2026)</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-           <div className="border-2 border-dashed border-gray-300 rounded-xl p-5 flex flex-col items-center justify-center text-center bg-gray-50 h-full min-h-[220px] relative">
-             <input type="file" accept="image/*,application/pdf" multiple onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" title="Sube una o varias nóminas (Fotos o PDF)" />
-             <div className="pointer-events-none flex flex-col items-center">
-               <Upload className="w-10 h-10 text-gray-400 mb-2" />
-               <p className="font-bold text-sm text-gray-700">Haz clic o arrastra archivos aquí</p>
-               <p className="text-[10px] text-gray-500 mt-1 uppercase font-bold tracking-wider">Acepta Fotos y PDF. Puedes subir 3 nóminas juntas.</p>
-             </div>
-             {archivos.length > 0 && (
-               <div className="mt-4 w-full space-y-2 z-20 relative">
-                 {archivos.map((file, idx) => (
-                   <div key={idx} className="flex justify-between items-center bg-white p-2 border border-gray-200 rounded-lg shadow-sm text-xs">
-                     <span className="truncate font-bold text-gray-700 flex items-center gap-1"><FileText className="w-3.5 h-3.5 text-purple-500 shrink-0"/> {file.name || `Documento ${idx+1}`}</span>
-                     <button onClick={() => eliminarArchivo(idx)} className="text-red-500 hover:bg-red-50 p-1 rounded-md"><X className="w-4 h-4"/></button>
-                   </div>
-                 ))}
-               </div>
-             )}
-           </div>
-           <div className="bg-gradient-to-br from-purple-900 to-indigo-950 text-white p-6 rounded-2xl shadow-xl flex flex-col justify-center no-invert">
-             <h3 className="text-purple-300 font-black uppercase text-xs mb-3">Auditor Laboral IA 2026</h3>
-             <p className="text-xs text-purple-200 mb-6 leading-relaxed">Sube tus nóminas en PDF o foto. Si subes 3 nóminas y utilizas el asistente de voz ("Calcula mis vacaciones"), la IA aplicará automáticamente la regla del promedio del Artículo 30.</p>
-             <button onClick={() => ejecutarAnálisis()} disabled={isAnalyzing || archivos.length === 0} className={`w-full p-4 rounded-xl font-bold shadow-lg transition-all text-white ${apiKey ? 'bg-purple-600 hover:bg-purple-500' : 'bg-yellow-600 hover:bg-yellow-500'}`}>
-               {isAnalyzing ? <><Loader2 className="w-5 h-5 mr-2 animate-spin inline"/> Procesando Documentos...</> : apiKey ? 'Ejecutar Auditoría 2026' : 'Configura tu Clave IA'}
-             </button>
-           </div>
+          <div className="border-2 border-dashed border-gray-300 rounded-xl p-5 flex flex-col items-center justify-center text-center bg-gray-50 h-full min-h-[220px] relative">
+            <input type="file" aria-label="Subir nóminas para auditoría completa" accept="image/jpeg,image/png,image/webp,application/pdf" multiple onChange={handleFileChange} className="absolute inset-0 opacity-0 cursor-pointer w-full h-full z-10" />
+            <div className="pointer-events-none flex flex-col items-center">
+              <Upload className="w-10 h-10 text-gray-400 mb-2" />
+              <p className="font-bold text-sm text-gray-700">Haz clic o arrastra archivos aquí</p>
+              <p className="text-[10px] text-gray-500 mt-1 uppercase font-bold">Acepta Fotos y PDF (Máx. 10 MB). Puedes subir 3 nóminas juntas.</p>
+            </div>
+            {errorArchivo && (
+              <div className="mt-3 p-2.5 bg-red-100 border border-red-300 text-red-800 rounded-lg text-xs font-bold z-20 relative">
+                {errorArchivo}
+              </div>
+            )}
+            {archivos.length > 0 && (
+              <div className="mt-4 w-full space-y-2 z-20 relative">
+                {archivos.map((file, idx) => (
+                  <div key={idx} className="flex justify-between items-center bg-white p-2 border border-gray-200 rounded-lg shadow-sm text-xs">
+                    <span className="truncate font-bold text-gray-700 flex items-center gap-1"><FileText className="w-3.5 h-3.5 text-purple-500 shrink-0"/> {file.name || `Documento ${idx+1}`}</span>
+                    <button aria-label={`Eliminar archivo ${file.name || idx + 1}`} onClick={() => eliminarArchivo(idx)} className="text-red-500 hover:bg-red-50 p-1 rounded-md"><X className="w-4 h-4"/></button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="bg-gradient-to-br from-purple-900 to-indigo-950 text-white p-6 rounded-2xl shadow-xl flex flex-col justify-center no-invert">
+            <h3 className="text-purple-300 font-black uppercase text-xs mb-3">Auditor Laboral IA 2026</h3>
+            <p className="text-xs text-purple-200 mb-6 leading-relaxed">Sube tus nóminas en PDF o foto. Si subes 3 nóminas, la IA calculará automáticamente tu promedio de vacaciones según el Artículo 30.</p>
+            <button onClick={() => ejecutarAnálisis()} disabled={isAnalyzing || archivos.length === 0} className={`w-full p-4 rounded-xl font-bold shadow-lg transition-all text-white ${apiKey ? 'bg-purple-600 hover:bg-purple-500' : 'bg-yellow-600'}`}>
+              {isAnalyzing ? <><Loader2 className="w-5 h-5 mr-2 animate-spin inline"/> Procesando Documentos...</> : apiKey ? 'Ejecutar Auditoría 2026' : 'Configura tu Clave IA'}
+            </button>
+            {isAnalyzing && (
+              <button onClick={() => { abortRef.current?.abort(); setIsAnalyzing(false); }} className="mt-2 w-full py-2 bg-red-600/80 hover:bg-red-600 text-white font-bold text-xs rounded-lg transition">
+                Cancelar auditoría
+              </button>
+            )}
+          </div>
         </div>
       </div>
       {resultado && (
         <div className="bg-white p-6 rounded-2xl border border-purple-200 shadow-md">
-           <h3 className="font-bold text-purple-900 mb-3 flex items-center"><Sparkles className="w-5 h-5 mr-2 text-purple-600"/> Informe de Auditoría Emitido (Tablas 2026):</h3>
-           <div className="whitespace-pre-wrap text-sm text-gray-800 leading-relaxed font-serif bg-purple-50/50 p-5 rounded-xl border border-purple-100">{resultado}</div>
+          <h3 className="font-bold text-purple-900 mb-3 flex items-center"><Sparkles className="w-5 h-5 mr-2 text-purple-600"/> Informe de Auditoría Emitido (Tablas 2026):</h3>
+          <div className="whitespace-pre-wrap text-sm text-gray-800 leading-relaxed font-serif bg-purple-50/50 p-5 rounded-xl border border-purple-100">{resultado}</div>
         </div>
       )}
     </div>
@@ -1462,37 +1831,46 @@ const TraductorLegal = memo(({ apiKey, onConfigureIA }) => {
   const [texto, setTexto] = useState('');
   const [isTranslating, setIsTranslating] = useState(false);
   const [resultado, setResultado] = useState('');
+  const abortRef = useRef(null);
 
   const traducirTexto = async () => {
     if (!apiKey) { onConfigureIA(); return; }
     if (!texto.trim()) return;
     setIsTranslating(true);
     setResultado('');
-    const prompt = `Traduce el siguiente texto legal extraído de un convenio o del Estatuto de los Trabajadores a un lenguaje cotidiano, claro y comprensible para cualquier trabajador de a pie, explicando exactamente a qué tiene derecho o a qué le obliga: \n\n"${texto}"`;
-    const res = await callGeminiAPI(prompt, apiKey);
-    setResultado(res);
+    abortRef.current = new AbortController();
+    const prompt = `Traduce el siguiente texto legal extraído de un convenio o del Estatuto de los Trabajadores a un lenguaje cotidiano, claro y comprensible para cualquier trabajador de a pie, explicando exactamente a qué tiene derecho o a qué le obliga:\n\n"${texto}"`;
+    const res = await callGeminiAPI(prompt, apiKey, [], abortRef.current.signal);
+    if (res !== "Operación cancelada por el usuario.") {
+      setResultado(res);
+    }
     setIsTranslating(false);
   };
 
   return (
     <div className="animate-fadeIn space-y-6 w-full">
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100">
-        <h2 className="text-xl font-bold border-b border-gray-100 pb-3 mb-4 flex items-center text-purple-900"><BookType className="mr-3 text-purple-600 w-6 h-6" /> Traductor de Convenios e Artículos a Lenguaje Claro</h2>
+        <h2 className="text-xl font-bold border-b border-gray-100 pb-3 mb-4 flex items-center text-purple-900"><BookType className="mr-3 text-purple-600 w-6 h-6" /> Traductor de Convenios y Artículos a Lenguaje Claro</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-           <textarea rows="8" value={texto} onChange={e => setTexto(e.target.value)} placeholder="Pega aquí el texto legal confuso de un artículo del convenio o boletín..." className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-purple-500 outline-none resize-none font-sans" />
-           <div className="bg-gradient-to-br from-indigo-900 to-purple-950 text-white p-6 rounded-2xl shadow-xl flex flex-col justify-center no-invert">
-             <h3 className="text-indigo-300 font-bold uppercase text-xs mb-3">Inteligencia Jurídica Sencilla</h3>
-             <p className="text-xs text-indigo-200 mb-6 leading-relaxed">Convierte la jerga legal incomprensible en explicaciones directas sobre tus derechos reales.</p>
-             <button onClick={traducirTexto} disabled={isTranslating || !texto.trim()} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold p-4 rounded-xl w-full mt-auto shadow-md">
-               {isTranslating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin inline"/> Traduciendo...</> : apiKey ? 'Traducir a Lenguaje Claro' : 'Falta Clave IA'}
-             </button>
-           </div>
+          <textarea rows="8" maxLength={5000} value={texto} onChange={e => setTexto(e.target.value)} placeholder="Pega aquí el texto legal confuso de un artículo del convenio o boletín..." className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none resize-none" />
+          <div className="bg-gradient-to-br from-indigo-900 to-purple-950 text-white p-6 rounded-2xl shadow-xl flex flex-col justify-center no-invert">
+            <h3 className="text-indigo-300 font-bold uppercase text-xs mb-3">Inteligencia Jurídica Sencilla</h3>
+            <p className="text-xs text-indigo-200 mb-6 leading-relaxed">Convierte la jerga legal incomprensible en explicaciones directas sobre tus derechos reales.</p>
+            <button onClick={traducirTexto} disabled={isTranslating || !texto.trim()} className="bg-indigo-600 hover:bg-indigo-500 text-white font-bold p-4 rounded-xl w-full mt-auto shadow-md">
+              {isTranslating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin inline"/> Traduciendo...</> : apiKey ? 'Traducir a Lenguaje Claro' : 'Falta Clave IA'}
+            </button>
+            {isTranslating && (
+              <button onClick={() => { abortRef.current?.abort(); setIsTranslating(false); }} className="mt-2 w-full py-2 bg-red-600/80 hover:bg-red-600 text-white font-bold text-xs rounded-lg">
+                Cancelar traducción
+              </button>
+            )}
+          </div>
         </div>
       </div>
       {resultado && (
         <div className="bg-white p-6 rounded-2xl border border-indigo-200 shadow-md">
-           <h3 className="font-bold text-indigo-900 mb-3 flex items-center"><Sparkles className="w-5 h-5 mr-2 text-indigo-600"/> Explicación Clara:</h3>
-           <div className="whitespace-pre-wrap text-sm text-gray-800 leading-relaxed bg-indigo-50/50 p-5 rounded-xl border border-indigo-100">{resultado}</div>
+          <h3 className="font-bold text-indigo-900 mb-3 flex items-center"><Sparkles className="w-5 h-5 mr-2 text-indigo-600"/> Explicación Clara:</h3>
+          <div className="whitespace-pre-wrap text-sm text-gray-800 leading-relaxed bg-indigo-50/50 p-5 rounded-xl border border-indigo-100">{resultado}</div>
         </div>
       )}
     </div>
@@ -1501,35 +1879,31 @@ const TraductorLegal = memo(({ apiKey, onConfigureIA }) => {
 
 const RedactorPeticiones = memo(function RedactorPeticiones({ apiKey, onConfigureIA }) {
   const temas = [
-    "Petición de Vacaciones", 
-    "Solicitud de Cambio de Turno", 
-    "Reclamación por falta de EPIs / Ropa Laboral", 
-    "Petición de Excedencia Voluntaria", 
-    "Solicitud de permiso no retribuido de 10 días", 
-    "Queja Formal a Recursos Humanos", 
-    "Solicitud de Anticipo de Nómina", 
-    "Reclamación de Categoría Superior / Diferencias Salariales", 
-    "Otro Tema (Descríbelo en los detalles)"
+    "Petición de Vacaciones", "Solicitud de Cambio de Turno", "Reclamación por falta de EPIs / Ropa Laboral", 
+    "Petición de Excedencia Voluntaria", "Solicitud de permiso no retribuido de 10 días", "Queja Formal a Recursos Humanos", 
+    "Solicitud de Anticipo de Nómina", "Reclamación de Categoría Superior / Diferencias Salariales", "Otro Tema (Descríbelo en los detalles)"
   ];
-
   const [tema, setTema] = useState(temas[0]);
   const [detalles, setDetalles] = useState('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [documento, setDocumento] = useState('');
   const [copied, setCopied] = useState(false);
+  const abortRef = useRef(null);
 
   const handleRedactar = async () => {
     if (!apiKey) { onConfigureIA(); return; }
     setIsGenerating(true);
     setDocumento('');
-    const prompt = `Redacta una instancia u escrito formal oficial dirigido a la Dirección de Recursos Humanos de la empresa FCC Medio Ambiente (Valencia Zona Norte).
-Motivo principal de la solicitud: "${tema}".
-Detalles o especificaciones aportadas por el trabajador: "${detalles}".
-El escrito debe ser riguroso, formal y amparado en la legalidad vigente (Estatuto de los Trabajadores y Convenio Colectivo FCC 2026). Debe incluir campos claros entre corchetes para [Nombre y Apellidos], [DNI], [Fecha], y espacio para la [Firma del Trabajador/a].
-Firma al final asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT. No añadas introducciones o explicaciones extra fuera del escrito oficial.`;
+    abortRef.current = new AbortController();
+    const prompt = `Redacta una instancia o escrito formal oficial dirigido a la Dirección de Recursos Humanos de la empresa FCC Medio Ambiente (Valencia Zona Norte).
+Motivo principal: "${tema}". Detalles: "${detalles}".
+Debe incluir campos entre corchetes para [Nombre y Apellidos], [DNI], [Fecha] y [Firma del Trabajador/a].
+Firma al final asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT.`;
 
-    const res = await callGeminiAPI(prompt, apiKey);
-    setDocumento(res);
+    const res = await callGeminiAPI(prompt, apiKey, [], abortRef.current.signal);
+    if (res !== "Operación cancelada por el usuario.") {
+      setDocumento(res);
+    }
     setIsGenerating(false);
   };
 
@@ -1537,43 +1911,48 @@ Firma al final asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT. No añadas intr
     <div className="animate-fadeIn space-y-6 w-full print-area">
       <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 no-print">
         <h2 className="text-xl font-bold border-b border-gray-100 pb-3 mb-4 flex items-center text-red-900"><PenTool className="mr-3 text-red-600 w-6 h-6" /> Redactor Mágico de Peticiones e Instancias a RRHH</h2>
-        <p className="text-sm text-gray-500 mb-6 font-medium">Selecciona el tipo de solicitud que deseas realizar a la empresa e indica los detalles específicos. La IA redactará el documento oficial formal listo para registrar.</p>
-
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-           <div className="space-y-4">
-             <div>
-               <label className="block text-xs font-bold text-gray-700 mb-2 uppercase">Tipo de Solicitud / Instancia</label>
-               <select className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-800 focus:ring-2 focus:ring-red-500 outline-none" value={tema} onChange={e => setTema(e.target.value)}>
-                 {temas.map(t => <option key={t} value={t}>{t}</option>)}
-               </select>
-             </div>
-             <div>
-               <label className="block text-xs font-bold text-gray-700 mb-2 uppercase">Detalles Específicos (Fechas, Fechas de disfrute, Nombres...)</label>
-               <textarea rows="5" value={detalles} onChange={e => setDetalles(e.target.value)} placeholder="Ej: Solicito disfrutar de 5 días de vacaciones pendientes del 10 al 15 de Octubre..." className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl text-sm focus:ring-2 focus:ring-red-500 outline-none resize-none" />
-             </div>
-           </div>
-           <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl flex flex-col justify-between no-invert">
-             <div>
-               <h3 className="text-red-400 font-black uppercase text-xs mb-3">Redacción Oficial Imprimible</h3>
-               <p className="text-xs text-slate-300 leading-relaxed mb-4">El escrito resultante cumplirá con todos los formulismos legales y sindicales exigidos por Recursos Humanos de FCC para su registro oficial de entrada.</p>
-             </div>
-             <button onClick={handleRedactar} disabled={isGenerating} className={`w-full p-4 rounded-xl font-bold shadow-lg transition-all text-white mt-auto ${apiKey ? 'bg-red-600 hover:bg-red-500' : 'bg-amber-600 hover:bg-amber-500'}`}>
-               {isGenerating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin inline"/> Redactando instancia...</> : apiKey ? 'Redactar Petición Oficial' : 'Configurar Clave IA'}
-             </button>
-           </div>
+          <div className="space-y-4">
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase">Tipo de Solicitud / Instancia</label>
+              <select className="w-full p-3.5 bg-gray-50 border border-gray-200 rounded-xl text-sm font-bold text-gray-800 outline-none" value={tema} onChange={e => setTema(e.target.value)}>
+                {temas.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-gray-700 mb-2 uppercase">Detalles Específicos</label>
+              <textarea rows="5" maxLength={2500} value={detalles} onChange={e => setDetalles(e.target.value)} placeholder="Ej: Solicito disfrutar de 5 días de vacaciones pendientes del 10 al 15 de Octubre..." className="w-full p-4 bg-gray-50 border border-gray-200 rounded-xl text-sm outline-none resize-none" />
+            </div>
+          </div>
+          <div className="bg-slate-900 text-white p-6 rounded-2xl shadow-xl flex flex-col justify-between no-invert">
+            <div>
+              <h3 className="text-red-400 font-black uppercase text-xs mb-3">Redacción Oficial Imprimible</h3>
+              <p className="text-xs text-slate-300 leading-relaxed mb-4">El escrito resultante cumplirá con todos los formulismos legales y sindicales exigidos por Recursos Humanos de FCC para su registro oficial de entrada.</p>
+            </div>
+            <div className="space-y-2 mt-auto">
+              <button onClick={handleRedactar} disabled={isGenerating} className={`w-full p-4 rounded-xl font-bold shadow-lg transition-all text-white ${apiKey ? 'bg-red-600 hover:bg-red-500' : 'bg-amber-600'}`}>
+                {isGenerating ? <><Loader2 className="w-5 h-5 mr-2 animate-spin inline"/> Redactando instancia...</> : apiKey ? 'Redactar Petición Oficial' : 'Configurar Clave IA'}
+              </button>
+              {isGenerating && (
+                <button onClick={() => { abortRef.current?.abort(); setIsGenerating(false); }} className="w-full py-2 bg-red-900/80 hover:bg-red-800 text-white font-bold text-xs rounded-lg">
+                  Cancelar redacción
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       </div>
 
       {documento && (
         <div className="bg-white p-6 rounded-2xl border border-gray-200 shadow-md">
-           <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-3 no-print">
-             <h3 className="font-bold text-gray-800 flex items-center"><FileText className="w-5 h-5 mr-2 text-red-600"/> Instancia Oficial Generada:</h3>
-             <div className="flex gap-2">
-               <button onClick={() => { window.print(); }} className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-lg flex items-center gap-1.5"><Download className="w-4 h-4"/> Imprimir</button>
-               <button onClick={() => { navigator.clipboard.writeText(documento); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className={`px-3 py-1.5 font-bold text-xs rounded-lg text-white ${copied ? 'bg-green-600' : 'bg-red-600 hover:bg-red-700'}`}>{copied ? '¡Copiado!' : 'Copiar Texto'}</button>
-             </div>
-           </div>
-           <div className="whitespace-pre-wrap text-sm md:text-base text-gray-900 leading-relaxed font-serif bg-gray-50 p-6 rounded-xl border border-gray-200 shadow-inner">{documento}</div>
+          <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-3 no-print">
+            <h3 className="font-bold text-gray-800 flex items-center"><FileText className="w-5 h-5 mr-2 text-red-600"/> Instancia Oficial Generada:</h3>
+            <div className="flex gap-2">
+              <button onClick={() => window.print()} className="px-3 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 font-bold text-xs rounded-lg flex items-center gap-1.5"><Download className="w-4 h-4"/> Imprimir</button>
+              <button onClick={() => { navigator.clipboard.writeText(documento); setCopied(true); setTimeout(() => setCopied(false), 2000); }} className={`px-3 py-1.5 font-bold text-xs rounded-lg text-white ${copied ? 'bg-green-600' : 'bg-red-600'}`}>{copied ? '¡Copiado!' : 'Copiar Texto'}</button>
+            </div>
+          </div>
+          <div className="whitespace-pre-wrap text-sm md:text-base text-gray-900 leading-relaxed font-serif bg-gray-50 p-6 rounded-xl border border-gray-200 shadow-inner">{documento}</div>
         </div>
       )}
     </div>
@@ -1582,22 +1961,34 @@ Firma al final asesorado por JUAN CARLOS, DELEGADO SINDICAL CGT. No añadas intr
 
 const AsistenteIA = memo(({ apiKey, onSaveKey, onClearKey }) => {
   const [inputKey, setInputKey] = useState('');
+  const [soloSesion, setSoloSesion] = useState(false);
+  const [keyError, setKeyError] = useState('');
   const [mensaje, setMensaje] = useState('');
   const [chatHistory, setChatHistory] = useState([
-    { role: 'assistant', text: '¡Hola! Soy tu Asistente Legal e Inteligencia Artificial Sindical de CGT en FCC Medio Ambiente. Conozco a fondo el **Estatuto de los Trabajadores**, el **Convenio General del Sector de Limpieza Pública y Recogida**, y las **Tablas Salariales Definitivas de 2026** del **Convenio Colectivo FCC Zona Norte 2022-2027**. ¿En qué puedo ayudarte hoy?' }
+    { role: 'assistant', text: '¡Hola! Soy tu Asistente Legal e Inteligencia Artificial Sindical de CGT en FCC Medio Ambiente. Conozco a fondo el **Estatuto de los Trabajadores**, el **Convenio General del Sector**, y las **Tablas Salariales Definitivas de 2026** del **Convenio Colectivo FCC Zona Norte 2022-2027**. ¿En qué puedo ayudarte hoy?' }
   ]);
   const [loading, setLoading] = useState(false);
+  const abortRef = useRef(null);
+
+  const handleValidarYGuardarClave = () => {
+    const limpia = inputKey.trim();
+    if (limpia.length < 20) {
+      setKeyError('La clave introducida es demasiado corta. Asegúrate de copiar el código completo que empieza por AIzaSy...');
+      return;
+    }
+    setKeyError('');
+    onSaveKey(limpia, soloSesion);
+  };
 
   const handleEnviar = async () => {
     if (!mensaje.trim() || loading || !apiKey) return;
     const userText = mensaje;
     setMensaje('');
-    
     const newHistory = [...chatHistory, { role: 'user', text: userText }];
     setChatHistory(newHistory);
     setLoading(true);
-
-    const respuesta = await callGeminiAPI(newHistory, apiKey);
+    abortRef.current = new AbortController();
+    const respuesta = await callGeminiAPI(newHistory, apiKey, [], abortRef.current.signal);
     setChatHistory([...newHistory, { role: 'assistant', text: respuesta }]);
     setLoading(false);
   };
@@ -1609,217 +2000,145 @@ const AsistenteIA = memo(({ apiKey, onSaveKey, onClearKey }) => {
           <Bot className="w-8 h-8 text-purple-200" />
           <div>
             <h2 className="text-lg font-bold leading-tight">Asistente Sindical e Inteligencia Jurídica IA (2026)</h2>
-            <p className="text-xs text-purple-200">Estatuto de los Trabajadores • Convenio Sectorial Estatal • Convenio Colectivo FCC Valencia (Tablas 2026)</p>
+            <p className="text-xs text-purple-200">Estatuto de los Trabajadores • Convenio Sectorial • Convenio Colectivo FCC Valencia (Tablas 2026)</p>
           </div>
         </div>
         {apiKey && (
           <button onClick={onClearKey} className="text-xs bg-purple-900/60 hover:bg-purple-900 px-3 py-1.5 rounded-lg border border-purple-400/40 text-purple-200 font-bold transition">
-            Cambiar Clave IA
+            Borrar / Cambiar Clave IA
           </button>
         )}
       </div>
 
       {!apiKey && (
         <div className="bg-amber-50 border-2 border-amber-300 rounded-2xl p-6 shadow-md space-y-4 no-print">
-           <div className="flex items-center gap-2 text-amber-900 font-extrabold text-base border-b border-amber-200 pb-2">
-             <Key className="w-5 h-5 text-amber-600" /> Configuración de tu Clave Personal Gratuita de Google AI Studio
-           </div>
-           
-           <p className="text-xs md:text-sm text-amber-800 leading-relaxed font-medium">
-             Para activar el asistente inteligente e interpretar tus derechos laborales con IA, debes añadir tu clave gratuita de Google. Es rápida y totalmente personal:
-           </p>
-
-           <ol className="list-decimal list-inside text-xs md:text-sm text-amber-900 space-y-2 font-semibold bg-white p-4 rounded-xl border border-amber-200">
-             <li>Abre en tu navegador la web oficial: <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" className="text-blue-600 font-bold underline inline-flex items-center gap-1">aistudio.google.com <ExternalLink className="w-3 h-3"/></a></li>
-             <li>Inicia sesión con tu cuenta de correo de Google (Gmail).</li>
-             <li>Haz clic en el botón azul <strong>"Get API key"</strong> (Obtener clave API) en la esquina superior izquierda.</li>
-             <li>Pulsa en <strong>"Create API key"</strong> (Crear clave API) y copia el código generado.</li>
-             <li>Pégalo en el recuadro inferior y haz clic en <strong>"Guardar Clave"</strong>.</li>
-           </ol>
-
-           <div className="flex gap-2 pt-2">
-             <input type="password" placeholder="Pega aquí tu clave (AIzaSy...)" className="flex-1 p-3.5 bg-white border border-amber-300 rounded-xl text-sm font-mono focus:ring-2 focus:ring-amber-500 outline-none" value={inputKey} onChange={e => setInputKey(e.target.value)} />
-             <button onClick={() => onSaveKey(inputKey)} className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-6 py-3.5 rounded-xl text-sm shadow-md transition-all active:scale-95">
-               Guardar Clave
-             </button>
-           </div>
+          <div className="flex items-center gap-2 text-amber-900 font-extrabold text-base border-b border-amber-200 pb-2">
+            <Key className="w-5 h-5 text-amber-600" /> Configuración de tu Clave Personal Gratuita de Google AI Studio
+          </div>
+          <ol className="list-decimal list-inside text-xs md:text-sm text-amber-900 space-y-1.5 font-semibold bg-white p-4 rounded-xl border border-amber-200">
+            <li>Abre la web oficial: <a href="https://aistudio.google.com/" target="_blank" rel="noopener noreferrer" className="text-blue-600 font-bold underline">aistudio.google.com</a></li>
+            <li>Inicia sesión con tu cuenta de Google y pulsa en <strong>"Get API key"</strong> ➔ <strong>"Create API key"</strong>.</li>
+            <li>Copia el código generado (empieza por <code>AIzaSy...</code>) y pégalo aquí abajo.</li>
+          </ol>
+          <div className="flex flex-col sm:flex-row gap-2 pt-2">
+            <input type="password" aria-label="Introducir clave API de Gemini" placeholder="Pega aquí tu clave (AIzaSy...)" className="flex-1 p-3.5 bg-white border border-amber-300 rounded-xl text-sm font-mono outline-none" value={inputKey} onChange={e => setInputKey(e.target.value)} />
+            <button onClick={handleValidarYGuardarClave} className="bg-amber-600 hover:bg-amber-700 text-white font-bold px-6 py-3.5 rounded-xl text-sm shadow-md">
+              Guardar Clave
+            </button>
+          </div>
+          <label className="flex items-center gap-2 text-xs text-amber-900 font-bold cursor-pointer pt-1">
+            <input type="checkbox" checked={soloSesion} onChange={e => setSoloSesion(e.target.checked)} className="w-4 h-4 text-amber-600 rounded" />
+            <span>🔒 Ordenador compartido: no recordar la clave al cerrar la pestaña (Modo Seguro)</span>
+          </label>
+          {keyError && <p className="text-xs text-red-600 font-bold">{keyError}</p>}
         </div>
       )}
 
       <div className="flex-1 bg-white border border-gray-200 rounded-2xl p-4 overflow-y-auto shadow-inner space-y-4 custom-scrollbar">
-         {chatHistory.map((msg, idx) => (
-           <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-             <div className={`max-w-[85%] md:max-w-[75%] p-4 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'bg-purple-600 text-white rounded-br-none shadow-md font-medium' : 'bg-gray-100 text-gray-800 rounded-tl-none border border-gray-200 font-serif whitespace-pre-wrap'}`}>
-               {msg.text}
-             </div>
-           </div>
-         ))}
-         {loading && (
-           <div className="flex justify-start">
-             <div className="bg-gray-100 p-4 rounded-2xl rounded-tl-none border border-gray-200 text-sm text-gray-500 flex items-center gap-2">
-               <Loader2 className="w-4 h-4 animate-spin text-purple-600" /> Consultando Estatuto de los Trabajadores, Convenio General y Tablas FCC 2026...
-             </div>
-           </div>
-         )}
+        {chatHistory.map((msg, idx) => (
+          <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            <div className={`max-w-[85%] md:max-w-[75%] p-4 rounded-2xl text-sm leading-relaxed ${msg.role === 'user' ? 'bg-purple-600 text-white rounded-br-none shadow-md font-medium' : 'bg-gray-100 text-gray-800 rounded-tl-none border border-gray-200 font-serif whitespace-pre-wrap'}`}>
+              {msg.text}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div className="flex justify-start items-center gap-3">
+            <div className="bg-gray-100 p-4 rounded-2xl rounded-tl-none border border-gray-200 text-sm text-gray-500 flex items-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin text-purple-600" /> Consultando normativa laboral y Tablas FCC 2026...
+            </div>
+            <button onClick={() => { abortRef.current?.abort(); setLoading(false); }} className="text-xs bg-red-100 text-red-700 font-bold px-3 py-2 rounded-xl hover:bg-red-200 transition">
+              Cancelar
+            </button>
+          </div>
+        )}
       </div>
 
       <div className="flex gap-2 bg-white p-2 rounded-2xl border border-gray-200 shrink-0 shadow-sm no-print">
-         <input type="text" value={mensaje} onChange={e => setMensaje(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleEnviar()} placeholder={apiKey ? "Pregunta sobre convenio 2026, retenciones, jornada, permisos..." : "Debes añadir tu clave API en el recuadro superior..."} className="flex-1 px-4 py-3.5 bg-gray-50 rounded-xl outline-none text-sm font-medium" disabled={!apiKey || loading} />
-         <button onClick={handleEnviar} disabled={!apiKey || loading || !mensaje.trim()} className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-6 py-3.5 rounded-xl font-bold no-invert transition-all active:scale-95">
-           <Send className="w-5 h-5"/>
-         </button>
-      </div>
-    </div>
-  );
-});
-
-const PortalEmpleado = memo(() => {
-  return (
-    <div className="animate-fadeIn w-full max-w-4xl mx-auto space-y-6 print-area font-sans">
-      
-      <div className="bg-[#450a0a] border border-red-900/80 text-white p-6 rounded-2xl shadow-xl flex items-center gap-4">
-        <span className="text-3xl">👋</span>
-        <div>
-          <h2 className="text-lg md:text-xl font-black text-white leading-tight">
-            Hola compañeros/as, soy <span className="text-red-400">Juan Carlos, vuestro Delegado Sindical</span>.
-          </h2>
-          <p className="text-xs md:text-sm text-red-200/90 mt-1">
-            Aquí tenéis todas las herramientas oficiales para acceder a vuestras nóminas sin problemas.
-          </p>
-        </div>
-      </div>
-
-      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-white space-y-4">
-        <h3 className="text-base font-bold flex items-center gap-2 text-blue-400">
-          <Globe className="w-5 h-5" /> Acceso Web Directo
-        </h3>
-        <p className="text-xs text-slate-300">
-          Entra a tu nómina sin instalar nada, directamente desde el navegador.
-        </p>
-        <a 
-          href="https://iris.fcc.es/" 
-          target="_blank" 
-          rel="noopener noreferrer" 
-          className="flex items-center justify-center gap-2 w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold py-3.5 px-4 rounded-xl shadow-md transition-all text-sm"
-        >
-          Entrar a iris.fcc.es <ExternalLink className="w-4 h-4 ml-1" />
-        </a>
-      </section>
-
-      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-white space-y-4">
-        <h3 className="text-base font-bold flex items-center gap-2 text-emerald-400">
-          <Smartphone className="w-5 h-5" /> Descargar App FCC
-        </h3>
-        <p className="text-xs text-slate-300">
-          Instala la aplicación oficial en tu teléfono móvil:
-        </p>
-        <div className="space-y-2.5">
-          <a 
-            href="https://play.google.com/store/apps/details?id=es.fcc.app" 
-            target="_blank" 
-            rel="noopener noreferrer" 
-            className="flex items-center justify-center gap-2 w-full bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black py-3.5 px-4 rounded-xl shadow-md transition-all text-sm"
-          >
-            <Download className="w-4 h-4" /> Descargar para Android
-          </a>
-          <a 
-            href="https://www.fcc.es/linkapp" 
-            target="_blank" 
-            rel="noopener noreferrer" 
-            className="flex items-center justify-center gap-2 w-full bg-black hover:bg-slate-950 border border-slate-800 text-white font-bold py-3.5 px-4 rounded-xl shadow-md transition-all text-sm"
-          >
-            <Download className="w-4 h-4" /> Descargar para iOS
-          </a>
-        </div>
-      </section>
-
-      <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-white space-y-4">
-        <h3 className="text-base font-bold flex items-center gap-2 text-slate-200">
-          <Settings className="w-5 h-5 text-amber-500" /> Servicio Técnico (Servidek)
-        </h3>
-
-        <div className="grid grid-cols-1 gap-3">
-          <a 
-            href="mailto:servicedeskfcc@fcc.es" 
-            className="flex items-center gap-3 p-4 bg-slate-800/90 rounded-xl border border-slate-700/80 hover:bg-slate-750 transition"
-          >
-            <div className="bg-blue-600 p-2.5 rounded-lg text-white">
-              <Mail className="w-5 h-5" />
-            </div>
-            <div>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">ENVIAR EMAIL</p>
-              <p className="font-mono font-bold text-sm text-white">servicedeskfcc@fcc.es</p>
-            </div>
-          </a>
-
-          <div className="bg-slate-800/90 p-4 rounded-xl border border-slate-700/80 space-y-2">
-            <div className="flex items-center gap-2 mb-2">
-              <div className="bg-emerald-600 p-2 rounded-lg text-white">
-                <Phone className="w-4 h-4" />
-              </div>
-              <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider">LLAMAR A SOPORTE</span>
-            </div>
-            <a 
-              href="tel:+34919019499" 
-              className="flex items-center justify-between p-3 bg-slate-900 rounded-lg border border-slate-750 text-sm font-mono font-bold text-slate-200 hover:text-white transition"
-            >
-              <span>+(34) 919 019 499</span>
-              <ChevronRight className="w-4 h-4 text-slate-500" />
-            </a>
-            <a 
-              href="tel:+34902111344" 
-              className="flex items-center justify-between p-3 bg-slate-900 rounded-lg border border-slate-750 text-sm font-mono font-bold text-slate-200 hover:text-white transition"
-            >
-              <span>+(34) 902 111 344</span>
-              <ChevronRight className="w-4 h-4 text-slate-500" />
-            </a>
-          </div>
-        </div>
-
-        <div className="bg-amber-950/60 border border-amber-800/80 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
-            <span className="text-lg">📌</span>
-            <span className="text-xs font-bold text-amber-200 uppercase tracking-wide">CÓDIGOS DE INCIDENCIA</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <span className="font-mono bg-amber-900/90 text-amber-200 border border-amber-700/80 px-3 py-1 rounded-md text-xs font-bold">
-              Inc0273103
-            </span>
-            <span className="font-mono bg-amber-900/90 text-amber-200 border border-amber-700/80 px-3 py-1 rounded-md text-xs font-bold">
-              Inc0273064 general
-            </span>
-          </div>
-        </div>
-      </section>
-
-      <div className="flex justify-end pt-2">
-        <button 
-          onClick={() => window.print()} 
-          className="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 font-bold px-5 py-3 rounded-xl shadow-md border border-slate-700 text-xs transition"
-        >
-          <Printer className="w-4 h-4" /> Imprimir Contactos
+        <input type="text" aria-label="Mensaje para el asistente sindical" value={mensaje} onChange={e => setMensaje(e.target.value)} onKeyDown={e => e.key === 'Enter' && handleEnviar()} placeholder={apiKey ? "Pregunta sobre convenio 2026, retenciones, jornada, permisos..." : "Debes añadir tu clave API arriba..."} className="flex-1 px-4 py-3.5 bg-gray-50 rounded-xl outline-none text-sm font-medium" disabled={!apiKey || loading} />
+        <button aria-label="Enviar consulta" onClick={handleEnviar} disabled={!apiKey || loading || !mensaje.trim()} className="bg-purple-600 hover:bg-purple-700 disabled:opacity-50 text-white px-6 py-3.5 rounded-xl font-bold no-invert">
+          <Send className="w-5 h-5"/>
         </button>
       </div>
-
     </div>
   );
 });
 
+const PortalEmpleado = memo(() => (
+  <div className="animate-fadeIn w-full max-w-4xl mx-auto space-y-6 print-area font-sans">
+    <div className="bg-[#450a0a] border border-red-900/80 text-white p-6 rounded-2xl shadow-xl flex items-center gap-4 no-invert">
+      <span className="text-3xl">👋</span>
+      <div>
+        <h2 className="text-lg md:text-xl font-black text-white leading-tight">Hola compañeros/as, soy <span className="text-red-400">Juan Carlos, vuestro Delegado Sindical</span>.</h2>
+        <p className="text-xs md:text-sm text-red-200/90 mt-1">Aquí tenéis todas las herramientas oficiales para acceder a vuestras nóminas sin problemas.</p>
+      </div>
+    </div>
+
+    <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-white space-y-4 no-invert">
+      <h3 className="text-base font-bold flex items-center gap-2 text-blue-400"><Globe className="w-5 h-5" /> Acceso Web Directo</h3>
+      <p className="text-xs text-slate-300">Entra a tu nómina sin instalar nada, directamente desde el navegador.</p>
+      <a href="https://iris.fcc.es/" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 w-full bg-slate-800 hover:bg-slate-700 border border-slate-700 text-white font-bold py-3.5 px-4 rounded-xl shadow-md transition-all text-sm">
+        Entrar a iris.fcc.es <ExternalLink className="w-4 h-4 ml-1" />
+      </a>
+    </section>
+
+    <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-white space-y-4 no-invert">
+      <h3 className="text-base font-bold flex items-center gap-2 text-emerald-400"><Smartphone className="w-5 h-5" /> Descargar App FCC</h3>
+      <div className="space-y-2.5">
+        <a href="https://play.google.com/store/apps/details?id=es.fcc.app" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 w-full bg-emerald-500 hover:bg-emerald-600 text-slate-950 font-black py-3.5 px-4 rounded-xl shadow-md transition-all text-sm">
+          <Download className="w-4 h-4" /> Descargar para Android
+        </a>
+        <a href="https://www.fcc.es/linkapp" target="_blank" rel="noopener noreferrer" className="flex items-center justify-center gap-2 w-full bg-black hover:bg-slate-950 border border-slate-800 text-white font-bold py-3.5 px-4 rounded-xl shadow-md transition-all text-sm">
+          <Download className="w-4 h-4" /> Descargar para iOS
+        </a>
+      </div>
+    </section>
+
+    <section className="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl text-white space-y-4 no-invert">
+      <h3 className="text-base font-bold flex items-center gap-2 text-slate-200"><Settings className="w-5 h-5 text-amber-500" /> Servicio Técnico (Servidek)</h3>
+      <div className="grid grid-cols-1 gap-3">
+        <a href="mailto:servicedeskfcc@fcc.es" className="flex items-center gap-3 p-4 bg-slate-800/90 rounded-xl border border-slate-700/80">
+          <div className="bg-blue-600 p-2.5 rounded-lg text-white"><Mail className="w-5 h-5" /></div>
+          <div><p className="text-[10px] font-bold text-slate-400 uppercase">ENVIAR EMAIL</p><p className="font-mono font-bold text-sm text-white">servicedeskfcc@fcc.es</p></div>
+        </a>
+        <div className="bg-slate-800/90 p-4 rounded-xl border border-slate-700/80 space-y-2">
+          <div className="flex items-center gap-2 mb-2"><div className="bg-emerald-600 p-2 rounded-lg text-white"><Phone className="w-4 h-4" /></div><span className="text-[10px] font-bold text-slate-400 uppercase">LLAMAR A SOPORTE</span></div>
+          <a href="tel:+34919019499" className="flex items-center justify-between p-3 bg-slate-900 rounded-lg text-sm font-mono font-bold text-slate-200"><span>+(34) 919 019 499</span><ChevronRight className="w-4 h-4 text-slate-500" /></a>
+          <a href="tel:+34902111344" className="flex items-center justify-between p-3 bg-slate-900 rounded-lg text-sm font-mono font-bold text-slate-200"><span>+(34) 902 111 344</span><ChevronRight className="w-4 h-4 text-slate-500" /></a>
+        </div>
+      </div>
+      <div className="bg-amber-950/60 border border-amber-800/80 p-4 rounded-xl flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+        <span className="text-xs font-bold text-amber-200 uppercase">📌 CÓDIGOS DE INCIDENCIA</span>
+        <div className="flex flex-wrap gap-2">
+          <span className="font-mono bg-amber-900/90 text-amber-200 border border-amber-700/80 px-3 py-1 rounded-md text-xs font-bold">Inc0273103</span>
+          <span className="font-mono bg-amber-900/90 text-amber-200 border border-amber-700/80 px-3 py-1 rounded-md text-xs font-bold">Inc0273064 general</span>
+        </div>
+      </div>
+    </section>
+  </div>
+));
+
 const AfiliateCGT = memo(function AfiliateCGT() {
+  const estadoInicialFormulario = {
+    nombre: '', apellido1: '', apellido2: '', direccion: '', numero: '', piso: '', cp: '', poblacion: '', provincia: '',
+    dni: '', fechaNac: '', email: '', telFijo: '', telMovil: '', empresa: 'FCC Medio Ambiente', situacionLaboral: '',
+    jornadaLaboral: '', centroTrabajo: 'Valencia Zona Norte', iban: '', observaciones: '', privacidad: false, comunicaciones: false
+  };
   const [enviado, setEnviado] = useState(false);
   const [copiado, setCopiado] = useState(false);
-  
-  const [datosForm, setDatosForm] = useState({
-    nombre: '', apellido1: '', apellido2: '',
-    direccion: '', numero: '', piso: '', cp: '', poblacion: '', provincia: '',
-    dni: '', fechaNac: '', email: '', telFijo: '', telMovil: '',
-    empresa: 'FCC Medio Ambiente', situacionLaboral: '', jornadaLaboral: '', centroTrabajo: 'Valencia Zona Norte',
-    iban: '', observaciones: '', privacidad: false, comunicaciones: false
-  });
+  const [errorValidacion, setErrorValidacion] = useState('');
+  const [datosForm, setDatosForm] = useState(estadoInicialFormulario);
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
+    setErrorValidacion('');
     setDatosForm(prev => ({ ...prev, [name]: type === 'checkbox' ? checked : value }));
+  };
+
+  const limpiarDatosSensibles = () => {
+    setDatosForm(estadoInicialFormulario);
+    setEnviado(false);
+    setErrorValidacion('');
   };
 
   const textoResumen = `SOLICITUD DE AFILIACIÓN Y DOMICILIACIÓN DE CUOTAS - CGT
@@ -1856,141 +2175,108 @@ Destinatario: cgtfccjuancarlos@hotmail.com`;
 
   const handleSubmit = (e) => {
     e.preventDefault();
-    setEnviado(true);
-    try {
-      window.location.href = mailtoUrl;
-    } catch (err) {
-      console.log("Error mailto:", err);
+    if (!validarDniNie(datosForm.dni)) {
+      setErrorValidacion('El formato del DNI o NIE no es válido (ejemplo: 12345678A o X1234567A).');
+      return;
     }
-  };
-
-  const handleCopiarDatos = () => {
-    navigator.clipboard.writeText(textoResumen);
-    setCopiado(true);
-    setTimeout(() => setCopiado(false), 3000);
+    if (!validarIbanEspanol(datosForm.iban)) {
+      setErrorValidacion('La cuenta IBAN debe comenzar por ES seguido de 22 dígitos numéricos (24 caracteres en total).');
+      return;
+    }
+    setErrorValidacion('');
+    setEnviado(true);
+    try { window.location.href = mailtoUrl; } catch (err) {}
   };
 
   return (
     <div className="animate-fadeIn space-y-6 w-full print-area">
       <div className="bg-white p-4 md:p-8 rounded-2xl shadow-sm border border-gray-100">
         <div className="flex items-center gap-3 border-b border-gray-100 pb-4 mb-6">
-          <div className="p-3 bg-red-100 text-red-600 rounded-2xl shrink-0">
-            <Heart className="w-6 h-6 md:w-8 md:h-8 fill-red-600" />
-          </div>
+          <div className="p-3 bg-red-100 text-red-600 rounded-2xl shrink-0"><Heart className="w-6 h-6 fill-red-600" /></div>
           <div>
-            <h2 className="text-xl md:text-2xl font-black text-gray-800 tracking-tight">Afíliate a la CGT en FCC</h2>
+            <h2 className="text-xl md:text-2xl font-black text-gray-800">Afíliate a la CGT en FCC</h2>
             <p className="text-xs md:text-sm text-gray-500 font-bold">Unión, Defensa Colectiva y Asesoría Jurídica Sin Intermediarios</p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           <div className="lg:col-span-4 space-y-5">
-            <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg border border-slate-800">
+            <div className="bg-slate-900 text-white p-5 rounded-2xl shadow-lg border border-slate-800 no-invert">
               <h3 className="font-black text-sm uppercase tracking-wider mb-4 text-red-400">¿Por qué afiliarte a CGT?</h3>
-              <ul className="space-y-4 text-xs">
-                <li className="flex items-start gap-3">
-                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <span className="text-slate-300"><strong className="text-white block">Independencia Total:</strong> No dependemos de subvenciones ni de la empresa. Nos financiamos con nuestras cuotas.</span>
-                </li>
-                <li className="flex items-start gap-3">
-                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <span className="text-slate-300"><strong className="text-white block">Asesoría Jurídica Gratuita:</strong> Abogados laboralistas especializados a tu disposición.</span>
-                </li>
-                <li className="flex items-start gap-3">
-                  <Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" />
-                  <span className="text-slate-300"><strong className="text-white block">Democracia Directa:</strong> Las decisiones se toman en asamblea. Tu voz cuenta.</span>
-                </li>
+              <ul className="space-y-4 text-xs text-slate-300">
+                <li className="flex items-start gap-3"><Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" /><span><strong className="text-white block">Independencia Total:</strong> No dependemos de subvenciones ni de la empresa. Nos financiamos con nuestras cuotas.</span></li>
+                <li className="flex items-start gap-3"><Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" /><span><strong className="text-white block">Asesoría Jurídica Gratuita:</strong> Abogados laboralistas especializados a tu disposición.</span></li>
+                <li className="flex items-start gap-3"><Check className="w-4 h-4 text-red-500 shrink-0 mt-0.5" /><span><strong className="text-white block">Democracia Directa:</strong> Las decisiones se toman en asamblea. Tu voz cuenta.</span></li>
               </ul>
             </div>
-
-            <div className="bg-red-50 border border-red-200 p-5 rounded-2xl text-xs text-red-900 font-semibold shadow-sm">
-              <p className="flex items-center gap-2 mb-2"><MapPin className="w-4 h-4 text-red-600" /> Sede CGT Valencia: <strong className="underline">Av. del Cid, 154</strong></p>
-              <p className="flex items-center gap-2 mb-3"><Phone className="w-4 h-4 text-red-600" /> Teléfono: <strong>96 383 44 40</strong></p>
-              <div className="pt-3 border-t border-red-200/60 mt-3 space-y-2">
-                <p className="flex items-center gap-2 uppercase tracking-wide font-black text-red-800"><HelpCircle className="w-4 h-4 text-red-600" /> ¿Tienes alguna duda?</p>
-                <p className="text-[11px] leading-relaxed text-red-800">
-                  Si necesitas ayuda con la afiliación o tienes alguna consulta sindical, escríbenos directamente a:
-                </p>
-                <a href="mailto:cgtfccjuancarlos@hotmail.com" className="inline-flex items-center gap-1.5 font-bold underline text-red-700 hover:text-red-900 break-all bg-white px-2 py-1 rounded border border-red-200">
-                  <Mail className="w-3.5 h-3.5" /> cgtfccjuancarlos@hotmail.com
-                </a>
+            <div className="bg-red-50 border border-red-200 p-5 rounded-2xl text-xs text-red-900 font-semibold shadow-sm space-y-2">
+              <p className="flex items-center gap-2"><MapPin className="w-4 h-4 text-red-600" /> Sede CGT Valencia: <strong>Av. del Cid, 154</strong></p>
+              <p className="flex items-center gap-2"><Phone className="w-4 h-4 text-red-600" /> Teléfono: <strong>96 383 44 40</strong></p>
+              <div className="pt-2 border-t border-red-200/60 mt-2 space-y-1.5">
+                <p className="flex items-center gap-1.5 uppercase font-black text-red-800"><HelpCircle className="w-4 h-4 text-red-600" /> ¿Tienes alguna duda?</p>
+                <a href="mailto:cgtfccjuancarlos@hotmail.com" className="inline-flex items-center gap-1.5 font-bold underline text-red-700 bg-white px-2 py-1 rounded border border-red-200"><Mail className="w-3.5 h-3.5" /> cgtfccjuancarlos@hotmail.com</a>
               </div>
             </div>
           </div>
 
           <div className="lg:col-span-8">
             <div className="bg-gray-50 p-5 md:p-6 rounded-2xl border border-gray-200 shadow-inner">
-              <div className="flex items-center gap-2 mb-6 border-b border-gray-200 pb-3">
-                <FileText className="w-5 h-5 text-gray-700" />
-                <h3 className="font-black text-gray-800 text-base uppercase">Ficha Digital de Afiliación</h3>
-              </div>
-
               {enviado ? (
-                <div className="bg-green-50 border border-green-300 p-6 rounded-2xl text-green-900 space-y-5 shadow-sm animate-fadeIn">
-                  <div className="flex items-center gap-3 border-b border-green-200 pb-4">
-                    <div className="bg-green-600 p-2 rounded-full"><Check className="w-6 h-6 text-white" /></div>
-                    <div>
-                      <p className="font-black text-lg">¡Formulario Completado!</p>
-                      <p className="text-xs text-green-800 mt-0.5">Elige cómo quieres enviar tus datos a <strong className="break-all font-mono bg-white px-1 rounded border border-green-200">cgtfccjuancarlos@hotmail.com</strong></p>
-                    </div>
-                  </div>
-
-                  <div className="space-y-3">
-                    <a href={mailtoUrl} className="w-full py-3.5 bg-red-600 hover:bg-red-700 text-white font-black text-xs md:text-sm uppercase tracking-wide rounded-xl shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
-                      <Mail className="w-5 h-5" /> 1. Enviar desde mi App de Correo
-                    </a>
-                    
-                    <button type="button" onClick={handleCopiarDatos} className="w-full py-3.5 bg-slate-800 hover:bg-slate-900 text-white font-bold text-xs md:text-sm uppercase tracking-wide rounded-xl shadow-md flex items-center justify-center gap-2 transition-transform active:scale-95">
-                      <FileText className="w-5 h-5" /> {copiado ? '¡Datos Copiados al Portapapeles!' : '2. Copiar Datos (Opción Alternativa)'}
-                    </button>
-                    <p className="text-[10px] text-center text-green-800 font-semibold px-2">Si el botón rojo no te abre el correo, usa el botón negro para copiar todos los datos y pégalos en tu WhatsApp o en tu correo web de Gmail/Outlook.</p>
-                  </div>
-
-                  <div className="mt-4">
-                    <button type="button" onClick={() => setEnviado(false)} className="text-xs text-green-700 hover:text-green-900 underline font-bold w-full text-center block pt-2">
-                      Volver a modificar los datos
+                <div className="bg-green-50 border border-green-300 p-6 rounded-2xl text-green-900 space-y-4">
+                  <p className="font-black text-lg">¡Formulario Completado!</p>
+                  <a href={mailtoUrl} className="w-full py-3.5 bg-red-600 text-white font-black text-xs uppercase rounded-xl shadow-md flex items-center justify-center gap-2"><Mail className="w-5 h-5" /> 1. Enviar desde mi App de Correo</a>
+                  <button type="button" onClick={() => { navigator.clipboard.writeText(textoResumen); setCopiado(true); setTimeout(() => setCopiado(false), 3000); }} className="w-full py-3.5 bg-slate-800 text-white font-bold text-xs uppercase rounded-xl shadow-md flex items-center justify-center gap-2">
+                    <FileText className="w-5 h-5" /> {copiado ? '¡Datos Copiados!' : '2. Copiar Datos al Portapapeles'}
+                  </button>
+                  <div className="flex flex-col sm:flex-row gap-2 pt-2">
+                    <button type="button" onClick={() => setEnviado(false)} className="flex-1 text-xs text-green-800 bg-white border border-green-300 py-2.5 rounded-xl font-bold text-center">Volver a modificar</button>
+                    <button type="button" onClick={limpiarDatosSensibles} className="flex-1 text-xs text-red-700 bg-red-100 hover:bg-red-200 py-2.5 rounded-xl font-bold flex items-center justify-center gap-1">
+                      <Trash2 className="w-4 h-4" /> Borrar DNI e IBAN de la pantalla
                     </button>
                   </div>
                 </div>
               ) : (
-                <form onSubmit={handleSubmit} className="space-y-6">
-                  
+                <form onSubmit={handleSubmit} className="space-y-5">
+                  {errorValidacion && (
+                    <div className="p-3.5 bg-red-100 border border-red-300 text-red-800 rounded-xl text-xs font-bold flex items-center gap-2">
+                      <AlertCircle className="w-5 h-5 shrink-0 text-red-600" />
+                      <span>{errorValidacion}</span>
+                    </div>
+                  )}
                   <div className="space-y-3">
                     <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">1. Datos Personales</h4>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Nombre</label><input type="text" required name="nombre" value={datosForm.nombre} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Primer Apellido</label><input type="text" required name="apellido1" value={datosForm.apellido1} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Segundo Apellido</label><input type="text" name="apellido2" value={datosForm.apellido2} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">Nombre</label><input type="text" required name="nombre" value={datosForm.nombre} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">Primer Apellido</label><input type="text" required name="apellido1" value={datosForm.apellido1} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">Segundo Apellido</label><input type="text" name="apellido2" value={datosForm.apellido2} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
                     </div>
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      <div className="col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">DNI / NIE</label><input type="text" required name="dni" value={datosForm.dni} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Fecha Nacimiento</label><input type="date" required name="fechaNac" value={datosForm.fechaNac} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">DNI / NIE (Ej: 12345678A)</label><input type="text" required name="dni" value={datosForm.dni} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold uppercase" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">Fecha Nacimiento</label><input type="date" required name="fechaNac" value={datosForm.fechaNac} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
                     </div>
                   </div>
 
                   <div className="space-y-3">
                     <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">2. Contacto y Dirección</h4>
                     <div className="grid grid-cols-12 gap-3">
-                      <div className="col-span-12 md:col-span-6"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Vía / Dirección</label><input type="text" required name="direccion" value={datosForm.direccion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-4 md:col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Nº</label><input type="text" required name="numero" value={datosForm.numero} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-8 md:col-span-4"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Piso / Pta</label><input type="text" name="piso" value={datosForm.piso} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-4 md:col-span-3"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Cód. Postal</label><input type="text" required name="cp" value={datosForm.cp} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-8 md:col-span-5"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Población</label><input type="text" required name="poblacion" value={datosForm.poblacion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div className="col-span-12 md:col-span-4"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Provincia</label><input type="text" required name="provincia" value={datosForm.provincia} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-12 md:col-span-6"><label className="block text-[10px] font-bold uppercase mb-1">Vía / Dirección</label><input type="text" required name="direccion" value={datosForm.direccion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-4 md:col-span-2"><label className="block text-[10px] font-bold uppercase mb-1">Nº</label><input type="text" required name="numero" value={datosForm.numero} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-8 md:col-span-4"><label className="block text-[10px] font-bold uppercase mb-1">Piso / Pta</label><input type="text" name="piso" value={datosForm.piso} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-4 md:col-span-3"><label className="block text-[10px] font-bold uppercase mb-1">Cód. Postal</label><input type="text" required name="cp" value={datosForm.cp} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-8 md:col-span-5"><label className="block text-[10px] font-bold uppercase mb-1">Población</label><input type="text" required name="poblacion" value={datosForm.poblacion} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div className="col-span-12 md:col-span-4"><label className="block text-[10px] font-bold uppercase mb-1">Provincia</label><input type="text" required name="provincia" value={datosForm.provincia} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 pt-2">
-                      <div className="md:col-span-2"><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">E-Mail</label><input type="email" name="email" value={datosForm.email} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Tel. Móvil</label><input type="tel" required name="telMovil" value={datosForm.telMovil} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">E-Mail</label><input type="email" name="email" value={datosForm.email} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
+                      <div><label className="block text-[10px] font-bold uppercase mb-1">Teléfono Móvil</label><input type="tel" required name="telMovil" value={datosForm.telMovil} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
                     </div>
                   </div>
 
                   <div className="space-y-3">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">3. Datos Laborales</h4>
+                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">3. Datos Laborales y Bancarios</h4>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Empresa</label><input type="text" required name="empresa" value={datosForm.empresa} onChange={handleChange} className="w-full p-2.5 bg-gray-100 border border-gray-300 rounded-lg text-xs font-bold text-gray-600" /></div>
-                      <div><label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Centro de Trabajo</label><input type="text" required name="centroTrabajo" value={datosForm.centroTrabajo} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold" /></div>
                       <div>
-                        <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Situación Laboral</label>
+                        <label className="block text-[10px] font-bold uppercase mb-1">Situación Laboral</label>
                         <select name="situacionLaboral" value={datosForm.situacionLaboral} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold">
                           <option value="">Seleccionar...</option>
                           <option value="Fijo">Fijo / Indefinido</option>
@@ -1999,51 +2285,27 @@ Destinatario: cgtfccjuancarlos@hotmail.com`;
                         </select>
                       </div>
                       <div>
-                        <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Jornada Laboral</label>
+                        <label className="block text-[10px] font-bold uppercase mb-1">Jornada Laboral</label>
                         <select name="jornadaLaboral" value={datosForm.jornadaLaboral} onChange={handleChange} className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-bold">
                           <option value="">Seleccionar...</option>
                           <option value="Completa">Jornada Completa</option>
-                          <option value="Parcial">Jornada Parcial</option>
+                          <option value="Parcial">Tiempo Parcial</option>
                         </select>
                       </div>
                     </div>
+                    <div><label className="block text-[10px] font-bold uppercase mb-1">Cuenta IBAN (ES + 22 dígitos)</label><input type="text" required name="iban" value={datosForm.iban} onChange={handleChange} placeholder="ESXX XXXX XXXX XXXX XXXX XXXX" className="w-full p-3 bg-red-50 border border-red-200 rounded-lg text-sm font-mono font-bold uppercase" /></div>
                   </div>
 
-                  <div className="space-y-3">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b pb-1">4. Orden de Domiciliación Bancaria</h4>
-                    <div>
-                      <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Cuenta IBAN (24 dígitos)</label>
-                      <input type="text" required name="iban" value={datosForm.iban} onChange={handleChange} placeholder="ESXX XXXX XXXX XXXX XXXX XXXX" className="w-full p-3 bg-red-50 border border-red-200 rounded-lg text-sm font-mono font-bold tracking-widest uppercase placeholder-red-200 focus:ring-2 focus:ring-red-500" />
-                    </div>
+                  <label className="flex items-start gap-3 cursor-pointer pt-2">
+                    <input type="checkbox" required name="privacidad" checked={datosForm.privacidad} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded" />
+                    <span className="text-[10px] text-gray-600"><strong>Acepto la Política de Privacidad:</strong> Autorizo a CGT al tratamiento de estos datos para tramitar la afiliación sindical. (Tus datos bancarios y DNI no se guardan en este navegador).</span>
+                  </label>
+                  <div className="flex flex-col sm:flex-row gap-2">
+                    <button type="submit" className="flex-1 py-4 bg-red-600 hover:bg-red-700 text-white font-black text-sm uppercase rounded-xl shadow-lg flex items-center justify-center gap-2"><Send className="w-5 h-5" /> Generar Solicitud de Afiliación</button>
+                    <button type="button" onClick={limpiarDatosSensibles} className="px-4 py-4 bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold text-xs uppercase rounded-xl flex items-center justify-center gap-1">
+                      <Trash2 className="w-4 h-4" /> Limpiar
+                    </button>
                   </div>
-
-                  <div className="space-y-3 bg-gray-100 p-4 rounded-xl border border-gray-200">
-                    <h4 className="text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-300 pb-1">5. Consentimientos y Observaciones</h4>
-                    
-                    <div className="space-y-3">
-                      <label className="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" required name="privacidad" checked={datosForm.privacidad} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded border-gray-300" />
-                        <span className="text-[10px] text-gray-600 leading-tight">
-                          <strong className="text-gray-800">Acepto la Política de Privacidad:</strong> Autorizo a la Confederación General del Trabajo (CGT) al tratamiento de estos datos para tramitar la afiliación, el cobro de la cuota sindical y mantener la relación asociativa, conforme a la normativa vigente de Protección de Datos.
-                        </span>
-                      </label>
-                      <label className="flex items-start gap-3 cursor-pointer">
-                        <input type="checkbox" name="comunicaciones" checked={datosForm.comunicaciones} onChange={handleChange} className="w-5 h-5 mt-0.5 text-red-600 rounded border-gray-300" />
-                        <span className="text-[10px] text-gray-600 leading-tight">
-                          <strong className="text-gray-800">Comunicaciones:</strong> Acepto estar al día de las novedades de CGT y recibir comunicaciones y noticias relacionadas con la entidad.
-                        </span>
-                      </label>
-                    </div>
-
-                    <div className="pt-2">
-                      <label className="block text-[10px] font-bold uppercase text-gray-700 mb-1">Observaciones o Dudas (Opcional)</label>
-                      <textarea rows="2" name="observaciones" value={datosForm.observaciones} onChange={handleChange} placeholder="Si tienes alguna duda escríbenos aquí..." className="w-full p-2.5 bg-white border border-gray-300 rounded-lg text-xs font-medium resize-none" />
-                    </div>
-                  </div>
-
-                  <button type="submit" className="w-full py-4 bg-red-600 hover:bg-red-700 text-white font-black text-sm uppercase tracking-wider rounded-xl shadow-lg transition-transform active:scale-95 flex items-center justify-center gap-2">
-                    <Send className="w-5 h-5" /> Generar Solicitud de Afiliación
-                  </button>
                 </form>
               )}
             </div>
@@ -2060,155 +2322,107 @@ const TablaPermisos = memo(() => {
   const [desplazamiento, setDesplazamiento] = useState(false);
   const [resultadoPermiso, setResultadoPermiso] = useState(null);
 
-  const calcularPermiso = () => {
-     if (!motivo || !grado) { setResultadoPermiso(null); return; }
-     let dias = 0;
-     let texto = "";
-     let libroFamilia = "";
+  useEffect(() => {
+    if (!motivo || !grado) { setResultadoPermiso(null); return; }
+    let dias = 0, texto = "", libroFamilia = "";
 
-     if (motivo === "fallecimiento") {
-         if (grado === "1") { 
-           dias = desplazamiento ? 7 : 4; 
-           texto = desplazamiento 
-             ? "Fallecimiento 1º Grado (4 días hábiles + 3 por desplazamiento según Art. 31 Convenio FCC)" 
-             : "Fallecimiento 1º Grado (4 días hábiles por Art. 31 Convenio FCC)"; 
-           libroFamilia = "Lleva tu Libro de Familia propio y el justificante oficial de defunción."; 
-         }
-         else if (grado === "2") { 
-           dias = desplazamiento ? 6 : 3; 
-           texto = desplazamiento 
-             ? "Fallecimiento 2º Grado (3 días hábiles + 3 por desplazamiento según Art. 31 Convenio FCC)" 
-             : "Fallecimiento 2º Grado (3 días hábiles por Art. 31 Convenio FCC)"; 
-           libroFamilia = "Lleva tu Libro de Familia y el de tus padres para demostrar el parentesco de 2º grado."; 
-         }
-         else if (grado === "3") { 
-           dias = desplazamiento ? 4 : 2; 
-           texto = desplazamiento 
-             ? "Fallecimiento 3º Grado (2 días + 2 adicionales por desplazamiento >200 km según Art. 31 Convenio FCC)" 
-             : "Fallecimiento 3º Grado (2 días según Art. 31 Convenio FCC)"; 
-           libroFamilia = "🚨 ATENCIÓN AL TRUCO: Lleva el Libro de Familia de tus padres Y el de tus abuelos para trazar la línea genealógica exacta hasta tu tío/sobrino."; 
-         }
-     } else if (motivo === "hospitalizacion") {
-         if (grado === "1" || grado === "2") {
-           dias = desplazamiento ? 6 : 5;
-           texto = desplazamiento 
-             ? "Hospitalización / Enfermedad Grave 1º y 2º Grado (3 días + 3 prórroga por desplazamiento = 6 días según Art. 31 Convenio FCC, más favorable que Estatuto)" 
-             : "Hospitalización, Intervención o Reposo Domiciliario 1º y 2º Grado (5 días retribuidos por Ley de Familias / Estatuto Art. 37.3.b)";
-           libroFamilia = "Lleva tu Libro de Familia (y el de tus padres si es hermano/abuelo) y el justificante médico oficial (debe indicar expresamente ingreso o reposo domiciliario).";
-         } else if (grado === "3") {
-           dias = desplazamiento ? 4 : 2;
-           texto = desplazamiento 
-             ? "Hospitalización / Enfermedad Grave 3º Grado (2 días + 2 de prórroga por desplazamiento >200 km según Art. 31 Convenio FCC)" 
-             : "Hospitalización / Enfermedad Grave 3º Grado (2 días según Art. 31 Convenio FCC. El Estatuto no lo cubre, pero nuestro Convenio sí)";
-           libroFamilia = "🚨 ATENCIÓN AL TRUCO: Lleva los Libros de Familia cruzados (el tuyo, el de tus padres Y el de tus abuelos) para trazar la línea genealógica exacta hasta tu tío/sobrino, además del justificante médico.";
-         }
-     } else if (motivo === "matrimonio_fam") {
-         if (["1", "2"].includes(grado)) { 
-           dias = desplazamiento ? 6 : 2; 
-           texto = desplazamiento 
-             ? "Matrimonio de Hijos/as o Hermanos/as (2 días laborables + 4 por desplazamiento según Art. 31 Convenio FCC)" 
-             : "Matrimonio de Hijos/as o Hermanos/as (2 días laborables según Art. 31 Convenio FCC)"; 
-           libroFamilia = "Presenta copia de la invitación oficial y, a posteriori, el justificante del juzgado o registro."; 
-         }
-         else { 
-           setResultadoPermiso({ 
-             dias: 0, 
-             texto: "No hay permiso retribuido estipulado para matrimonio de 3º grado ni en Convenio ni en Estatuto.", 
-             libroFamilia: "Para este evento deberás solicitar días de Asuntos Propios (3 días al año) o permiso no retribuido." 
-           }); 
-           return; 
-         }
-     }
+    if (motivo === "fallecimiento") {
+      if (grado === "1") { dias = desplazamiento ? 7 : 4; texto = "Fallecimiento 1º Grado (Art. 31 Convenio FCC)"; libroFamilia = "Lleva tu Libro de Familia propio y el justificante oficial de defunción."; }
+      else if (grado === "2") { dias = desplazamiento ? 6 : 3; texto = "Fallecimiento 2º Grado (Art. 31 Convenio FCC)"; libroFamilia = "Lleva tu Libro de Familia y el de tus padres para demostrar el parentesco de 2º grado."; }
+      else if (grado === "3") { dias = desplazamiento ? 4 : 2; texto = "Fallecimiento 3º Grado (Art. 31 Convenio FCC)"; libroFamilia = "🚨 ATENCIÓN AL TRUCO: Lleva el Libro de Familia de tus padres Y el de tus abuelos para trazar la línea genealógica exacta hasta tu tío/sobrino."; }
+    } else if (motivo === "hospitalizacion") {
+      if (grado === "1" || grado === "2") { dias = desplazamiento ? 6 : 5; texto = desplazamiento ? "Hospitalización 1º/2º Grado con desplazamiento (6 días por Convenio FCC)" : "Hospitalización / Reposo Domiciliario 1º/2º Grado (5 días por Ley de Familias / Estatuto Art. 37.3.b)"; libroFamilia = "Lleva tu Libro de Familia y el justificante médico oficial."; }
+      else if (grado === "3") { dias = desplazamiento ? 4 : 2; texto = "Hospitalización / Enfermedad Grave 3º Grado (Art. 31 Convenio FCC)"; libroFamilia = "🚨 ATENCIÓN AL TRUCO: Lleva los Libros de Familia cruzados (padres y abuelos) además del justificante médico."; }
+    } else if (motivo === "matrimonio_fam") {
+      if (["1", "2"].includes(grado)) { dias = desplazamiento ? 6 : 2; texto = "Matrimonio de Hijos/as o Hermanos/as (Art. 31 Convenio FCC)"; libroFamilia = "Presenta copia de la invitación oficial y justificante del registro."; }
+      else { setResultadoPermiso({ dias: 0, texto: "No hay permiso retribuido para matrimonio de 3º grado.", libroFamilia: "Deberás solicitar días de Asuntos Propios (3 al año)." }); return; }
+    }
+    setResultadoPermiso({ dias, texto, libroFamilia });
+  }, [motivo, grado, desplazamiento]);
 
-     setResultadoPermiso({ dias, texto, libroFamilia });
-  };
-
-  useEffect(() => { calcularPermiso(); }, [motivo, grado, desplazamiento]);
+  const listaPermisos = [
+    ["1. Matrimonio", "15 días naturales consecutivos."],
+    ["2. Fallecimiento (Cónyuge / Hijos / Padres)", "4 días hábiles + 3 por desplazamiento."],
+    ["3. Fallecimiento de Hermanos/as", "3 días hábiles + 3 por desplazamiento."],
+    ["4. Hospitalización / Intervención / Enfermedad Grave", "Hasta 5 días retribuidos por Ley de Familias (Estatuto Art. 37.3.b)."],
+    ["5. Fallecimiento de Familiares de 3º Grado", "2 días + 2 adicionales si hay desplazamiento."],
+    ["6. Matrimonio de Familiares de 1º o 2º Grado", "2 días + 4 en caso de desplazamiento."],
+    ["7. Alumbramiento de Esposa", "3 días + 3 por desplazamiento."],
+    ["8. Traslado de Domicilio Habitual", "2 días por convenio (mejora el Estatuto)."],
+    ["9. Asuntos Propios (Sin Justificar)", "3 días retribuidos al año."],
+    ["10. Exámenes Prenatales y Prep. Parto", "El tiempo indispensable con preaviso."],
+    ["11. Nacimiento / Adopción / Acogimiento", "16 semanas (Prestación SS 100%)."],
+    ["12. Cumplimiento de Deber Inexcusable Público", "Tiempo indispensable (Juicios, votaciones...)."]
+  ];
 
   return (
     <div className="animate-fadeIn space-y-6 w-full print-area">
       <div className="bg-white p-5 md:p-8 rounded-2xl shadow-sm border border-gray-100">
-        <div className="flex flex-col md:flex-row justify-between md:items-center border-b border-gray-100 pb-4 mb-6 gap-4">
-          <h2 className="text-xl md:text-2xl font-bold flex items-center text-blue-900">
-            <Briefcase className="mr-3 text-blue-600 w-8 h-8 shrink-0" /> Permisos y Licencias
-          </h2>
-        </div>
+        <h2 className="text-xl md:text-2xl font-bold flex items-center text-blue-900 border-b border-gray-100 pb-4 mb-6">
+          <Briefcase className="mr-3 text-blue-600 w-8 h-8 shrink-0" /> Permisos y Licencias
+        </h2>
 
         <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-6 rounded-2xl border border-blue-200 shadow-inner mb-8">
-           <h3 className="text-lg font-black text-blue-900 mb-4 flex items-center gap-2">
-             <Sparkles className="w-5 h-5 text-blue-600 animate-pulse" /> Asistente Mágico de Permisos
-             <span className="bg-blue-600 text-white text-[10px] px-2 py-1 rounded-full uppercase tracking-widest font-black animate-pulse">¡NUEVA SECCIÓN!</span>
-           </h3>
-           
-           <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-             <div>
-               <label className="block text-xs font-bold text-blue-900 mb-2 uppercase">1. ¿Qué ha ocurrido?</label>
-               <select className="w-full p-3.5 bg-white border border-blue-200 rounded-xl text-sm font-medium focus:outline-none" value={motivo} onChange={e => setMotivo(e.target.value)}>
-                 <option value="">Selecciona motivo...</option>
-                 <option value="fallecimiento">Fallecimiento</option>
-                 <option value="hospitalizacion">Hospitalización / Reposo Dom.</option>
-                 <option value="matrimonio_fam">Matrimonio de Familiar</option>
-               </select>
-             </div>
-             <div>
-               <label className="block text-xs font-bold text-blue-900 mb-2 uppercase">2. ¿Qué parentesco tenéis?</label>
-               <select className="w-full p-3.5 bg-white border border-blue-200 rounded-xl text-sm font-medium focus:outline-none" value={grado} onChange={e => setGrado(e.target.value)} disabled={!motivo}>
-                 <option value="">Selecciona grado...</option>
-                 <option value="1">1º Grado (Padres, Hijos, Cónyuge, Suegros)</option>
-                 <option value="2">2º Grado (Hermanos, Abuelos, Nietos, Cuñados)</option>
-                 <option value="3">3º Grado (Tíos, Sobrinos, Bisabuelos)</option>
-               </select>
-             </div>
-             <div className="flex flex-col justify-end">
-               <label className="flex items-center space-x-3 cursor-pointer p-3.5 bg-white border border-blue-200 rounded-xl">
-                 <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={desplazamiento} onChange={e => setDesplazamiento(e.target.checked)} disabled={!motivo || !grado} />
-                 <span className="text-sm font-bold text-blue-900">¿Requiere desplazamiento?</span>
-               </label>
-             </div>
-           </div>
+          <h3 className="text-lg font-black text-blue-900 mb-4 flex items-center gap-2">
+            <Sparkles className="w-5 h-5 text-blue-600 animate-pulse" /> Asistente Mágico de Permisos
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+            <div>
+              <label className="block text-xs font-bold text-blue-900 mb-2 uppercase">1. ¿Qué ha ocurrido?</label>
+              <select className="w-full p-3.5 bg-white border border-blue-200 rounded-xl text-sm font-medium outline-none" value={motivo} onChange={e => setMotivo(e.target.value)}>
+                <option value="">Selecciona motivo...</option>
+                <option value="fallecimiento">Fallecimiento</option>
+                <option value="hospitalizacion">Hospitalización / Reposo Dom.</option>
+                <option value="matrimonio_fam">Matrimonio de Familiar</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-bold text-blue-900 mb-2 uppercase">2. ¿Qué parentesco tenéis?</label>
+              <select className="w-full p-3.5 bg-white border border-blue-200 rounded-xl text-sm font-medium outline-none" value={grado} onChange={e => setGrado(e.target.value)} disabled={!motivo}>
+                <option value="">Selecciona grado...</option>
+                <option value="1">1º Grado (Padres, Hijos, Cónyuge, Suegros)</option>
+                <option value="2">2º Grado (Hermanos, Abuelos, Nietos, Cuñados)</option>
+                <option value="3">3º Grado (Tíos, Sobrinos, Bisabuelos)</option>
+              </select>
+            </div>
+            <div className="flex flex-col justify-end">
+              <label className="flex items-center space-x-3 cursor-pointer p-3.5 bg-white border border-blue-200 rounded-xl">
+                <input type="checkbox" className="w-5 h-5 text-blue-600 rounded" checked={desplazamiento} onChange={e => setDesplazamiento(e.target.checked)} disabled={!motivo || !grado} />
+                <span className="text-sm font-bold text-blue-900">¿Requiere desplazamiento?</span>
+              </label>
+            </div>
+          </div>
 
-           {resultadoPermiso && (
-             <div className="bg-white p-5 rounded-xl border border-blue-200 shadow-sm mt-4 animate-fadeIn">
-                <p className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Te corresponden:</p>
-                <div className="text-3xl font-black text-blue-700 mb-2">
-                  {resultadoPermiso.dias} Días{" "}
-                  <span className="text-lg text-blue-500">
-                    {desplazamiento ? '(Con desplazamiento)' : '(Sin desplazamiento)'}
-                  </span>
-                </div>
-                <p className="text-sm font-bold text-gray-800 mb-4">{resultadoPermiso.texto}</p>
-                
-                <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg">
-                   <p className="text-xs font-black text-red-800 uppercase tracking-widest mb-1 flex items-center gap-1"><AlertCircle className="w-4 h-4"/> El Truco del Libro de Familia</p>
-                   <p className="text-sm text-red-900 font-medium">{resultadoPermiso.libroFamilia}</p>
-                </div>
-             </div>
-           )}
+          {resultadoPermiso && (
+            <div className="bg-white p-5 rounded-xl border border-blue-200 shadow-sm mt-4 animate-fadeIn">
+              <p className="text-xs font-bold text-gray-500 uppercase mb-1">Te corresponden:</p>
+              <div className="text-3xl font-black text-blue-700 mb-2">{resultadoPermiso.dias} Días <span className="text-lg text-blue-500">{desplazamiento ? '(Con desplazamiento)' : '(Sin desplazamiento)'}</span></div>
+              <p className="text-sm font-bold text-gray-800 mb-4">{resultadoPermiso.texto}</p>
+              <div className="bg-red-50 border-l-4 border-red-500 p-4 rounded-r-lg">
+                <p className="text-xs font-black text-red-800 uppercase mb-1 flex items-center gap-1"><AlertCircle className="w-4 h-4"/> El Truco del Libro de Familia</p>
+                <p className="text-sm text-red-900 font-medium">{resultadoPermiso.libroFamilia}</p>
+              </div>
+            </div>
+          )}
         </div>
 
         <div className="grid md:grid-cols-2 gap-8">
-          <div className="space-y-3">
-            <h3 className="text-base font-bold text-gray-800 uppercase tracking-wide mb-3 flex items-center"><Clock className="w-5 h-5 mr-2 text-blue-600" /> Los 12 Permisos Retribuidos Oficiales</h3>
-            <div className="p-4 border-l-4 border-blue-500 bg-blue-50 rounded-r-xl shadow-sm"><p className="font-bold text-blue-900">1. Matrimonio</p><p className="text-sm text-blue-800"><span className="font-bold text-base">15 días</span> naturales consecutivos.</p></div>
-            <div className="p-4 border-l-4 border-red-500 bg-red-50 rounded-r-xl shadow-sm"><p className="font-bold text-red-900">2. Fallecimiento (Cónyuge / Hijos / Padres)</p><p className="text-sm text-red-800"><span className="font-bold text-base">4 días</span> hábiles + 3 por desplazamiento.</p></div>
-            <div className="p-4 border-l-4 border-orange-500 bg-orange-50 rounded-r-xl shadow-sm"><p className="font-bold text-orange-900">3. Fallecimiento de Hermanos/as</p><p className="text-sm text-orange-800"><span className="font-bold text-base">3 días</span> hábiles + 3 por desplazamiento.</p></div>
-            <div className="p-4 border-l-4 border-yellow-500 bg-yellow-50 rounded-r-xl shadow-sm"><p className="font-bold text-yellow-900">4. Hospitalización / Intervención / Enfermedad Grave</p><p className="text-sm text-yellow-800">Hasta <span className="font-bold text-base">5 días</span> retribuidos por Ley de Familias (Estatuto Art. 37.3.b).</p></div>
-            <div className="p-4 border-l-4 border-fuchsia-500 bg-fuchsia-50 rounded-r-xl shadow-sm"><p className="font-bold text-fuchsia-900">5. Fallecimiento de Familiares de 3º Grado</p><p className="text-sm text-fuchsia-800"><span className="font-bold text-base">2 días</span> + 2 adicionales si hay desplazamiento.</p></div>
-            <div className="p-4 border-l-4 border-cyan-500 bg-cyan-50 rounded-r-xl shadow-sm"><p className="font-bold text-cyan-900">6. Matrimonio de Familiares de 1º o 2º Grado</p><p className="text-sm text-cyan-800"><span className="font-bold text-base">2 días</span> + 4 en caso de desplazamiento.</p></div>
-            <div className="p-4 border-l-4 border-rose-500 bg-rose-50 rounded-r-xl shadow-sm"><p className="font-bold text-rose-900">7. Alumbramiento de Esposa</p><p className="text-sm text-rose-800"><span className="font-bold text-base">3 días</span> + 3 por desplazamiento.</p></div>
-            <div className="p-4 border-l-4 border-emerald-500 bg-emerald-50 rounded-r-xl shadow-sm"><p className="font-bold text-emerald-900">8. Traslado de Domicilio Habitual</p><p className="text-sm text-emerald-800"><span className="font-bold text-base">2 días</span> por convenio.</p></div>
-            <div className="p-4 border-l-4 border-teal-500 bg-teal-50 rounded-r-xl shadow-sm"><p className="font-bold text-teal-900">9. Asuntos Propios (Sin Justificar)</p><p className="text-sm text-teal-800"><span className="font-bold text-base">3 días</span> retribuidos al año.</p></div>
-            <div className="p-4 border-l-4 border-purple-500 bg-purple-50 rounded-r-xl shadow-sm"><p className="font-bold text-purple-900">10. Exámenes Prenatales y Preparación al Parto</p><p className="text-sm text-purple-800"><span className="font-bold text-base">El tiempo indispensable</span> con preaviso.</p></div>
-            <div className="p-4 border-l-4 border-pink-500 bg-pink-50 rounded-r-xl shadow-sm"><p className="font-bold text-pink-900">11. Nacimiento / Adopción / Acogimiento</p><p className="text-sm text-pink-800"><span className="font-bold text-base">16 semanas</span> (Prestación SS 100%).</p></div>
-            <div className="p-4 border-l-4 border-indigo-500 bg-indigo-50 rounded-r-xl shadow-sm"><p className="font-bold text-indigo-900">12. Cumplimiento de Deber Inexcusable Público</p><p className="text-sm text-indigo-800"><span className="font-bold text-base">Tiempo indispensable</span> (Juicios, votaciones...).</p></div>
+          <div className="space-y-2.5">
+            <h3 className="text-base font-bold text-gray-800 uppercase mb-3 flex items-center"><Clock className="w-5 h-5 mr-2 text-blue-600" /> Los 12 Permisos Retribuidos Oficiales</h3>
+            {listaPermisos.map(([tit, desc], i) => (
+              <div key={i} className="p-3.5 border-l-4 border-blue-500 bg-gray-50 rounded-r-xl shadow-sm">
+                <p className="font-bold text-gray-900 text-sm">{tit}</p>
+                <p className="text-xs text-gray-700 mt-0.5">{desc}</p>
+              </div>
+            ))}
           </div>
           <div className="space-y-4">
-            <h3 className="text-base font-bold text-gray-800 uppercase tracking-wide mb-3 flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-600" /> Esquema de Grados de Parentesco</h3>
-            <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 shadow-sm space-y-4">
+            <h3 className="text-base font-bold text-gray-800 uppercase mb-3 flex items-center"><Users className="w-5 h-5 mr-2 text-indigo-600" /> Esquema de Grados de Parentesco</h3>
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-5 shadow-sm">
               <ul className="space-y-4 text-sm">
-                <li className="flex items-start"><div className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded font-bold mr-3 mt-0.5 shrink-0">1º Grado</div><div className="text-slate-700 leading-tight">Padres, Hijos/as, Cónyuge / Pareja de Hecho, Suegros/as, Yerno y Nuera.</div></li>
-                <li className="flex items-start"><div className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded font-bold mr-3 mt-0.5 shrink-0">2º Grado</div><div className="text-slate-700 leading-tight">Abuelos/as, Nietos/as, Hermanos/as, Cuñados/as.</div></li>
-                <li className="flex items-start"><div className="bg-fuchsia-100 text-fuchsia-700 px-3 py-1 rounded font-bold mr-3 mt-0.5 shrink-0">3º Grado</div><div className="text-slate-700 leading-tight">Bisabuelos/as, Tíos/as, Sobrinos/as, Bisnietos/as.</div></li>
+                <li className="flex items-start"><div className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded font-bold mr-3 shrink-0">1º Grado</div><div className="text-slate-700">Padres, Hijos/as, Cónyuge / Pareja de Hecho, Suegros/as, Yerno y Nuera.</div></li>
+                <li className="flex items-start"><div className="bg-indigo-100 text-indigo-700 px-3 py-1 rounded font-bold mr-3 shrink-0">2º Grado</div><div className="text-slate-700">Abuelos/as, Nietos/as, Hermanos/as, Cuñados/as.</div></li>
+                <li className="flex items-start"><div className="bg-fuchsia-100 text-fuchsia-700 px-3 py-1 rounded font-bold mr-3 shrink-0">3º Grado</div><div className="text-slate-700">Bisabuelos/as, Tíos/as, Sobrinos/as, Bisnietos/as.</div></li>
               </ul>
             </div>
           </div>
@@ -2227,14 +2441,12 @@ const CalculoAntiguedad = memo(({ perfil }) => {
     const ingreso = new Date(f);
     const hoy = new Date();
     let a = hoy.getFullYear() - ingreso.getFullYear();
-    if(hoy.getMonth() < ingreso.getMonth() || (hoy.getMonth() === ingreso.getMonth() && hoy.getDate() < ingreso.getDate())) a--;
+    if (hoy.getMonth() < ingreso.getMonth() || (hoy.getMonth() === ingreso.getMonth() && hoy.getDate() < ingreso.getDate())) a--;
     return Math.max(0, a);
   };
 
   const aniosEfectivos = modoFecha ? calcularAntigüedadDesdeFecha(fechaAlta) : aniosInput;
-
-  let porcentaje = 0;
-  let tramoActual = "Menos de 2 Años";
+  let porcentaje = 0, tramoActual = "Menos de 2 Años";
   for (let i = 0; i < escalaAntiguedad.length; i++) {
     if (aniosEfectivos >= escalaAntiguedad[i].años) {
       porcentaje = escalaAntiguedad[i].porcentaje;
@@ -2242,39 +2454,36 @@ const CalculoAntiguedad = memo(({ perfil }) => {
     } else break;
   }
 
-  const baseDiariaPeon = tablaSalarial2026["Peón limpieza día"]?.base || 31.35;
+  const baseDiariaPeon = tablaSalarial2026[perfil.categoria]?.base || 31.35;
   const plusAntiguedadDiario = (baseDiariaPeon * porcentaje) / 100;
 
   return (
     <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-6">
       <h2 className="text-xl font-bold border-b border-gray-100 pb-3 text-gray-800 flex items-center"><Calendar className="w-6 h-6 mr-3 text-red-600" /> Antigüedad, Tramos y Ayudas Sociales (2026)</h2>
-      
       <div className="bg-green-50 p-6 rounded-xl border border-green-200 shadow-sm space-y-4">
-         <div className="flex justify-between items-center border-b border-green-200 pb-3">
-           <p className="text-xs font-bold text-green-900 uppercase tracking-widest">Simulador de Tramos de Antigüedad (Art. 12)</p>
-           <button onClick={() => setModoFecha(!modoFecha)} className="text-xs bg-white text-green-700 px-3 py-1.5 rounded-lg font-bold border border-green-300 shadow-sm">
-             {modoFecha ? 'Modo Años Cumplidos' : 'Modo Fecha de Alta'}
-           </button>
-         </div>
-
-         {!modoFecha ? (
-           <div className="flex items-center justify-center gap-4">
-             <button onClick={() => setAniosInput(Math.max(0, aniosInput - 1))} className="bg-white w-12 h-12 rounded-xl border border-green-300 font-bold text-2xl text-green-800 shadow-sm">-</button>
-             <div className="text-center px-4"><span className="text-3xl font-black text-green-900">{aniosInput}</span><span className="text-xs font-bold block text-green-700 uppercase">Años Cumplidos</span></div>
-             <button onClick={() => setAniosInput(aniosInput + 1)} className="bg-white w-12 h-12 rounded-xl border border-green-300 font-bold text-2xl text-green-800 shadow-sm">+</button>
-           </div>
-         ) : (
-           <div className="max-w-xs mx-auto">
-             <label className="block text-xs font-bold text-green-800 mb-1">Fecha de Alta en la Empresa:</label>
-             <input type="date" value={fechaAlta} onChange={e => setFechaAlta(e.target.value)} className="w-full p-3 bg-white border border-green-300 rounded-xl text-center font-bold text-green-900" />
-           </div>
-         )}
-
-         <div className="grid grid-cols-2 md:grid-cols-3 gap-3 bg-white p-4 rounded-xl border border-green-200 text-center">
-            <div><span className="text-[10px] text-gray-400 font-bold uppercase block">Tramo Alcanzado</span><span className="font-bold text-gray-800 text-sm">{tramoActual}</span></div>
-            <div><span className="text-[10px] text-gray-400 font-bold uppercase block">% Salario Base</span><span className="font-mono font-black text-green-600 text-lg">+{porcentaje}%</span></div>
-            <div className="col-span-2 md:col-span-1"><span className="text-[10px] text-gray-400 font-bold uppercase block">Plus Diario Estimado (2026)</span><span className="font-mono font-black text-green-700 text-lg">+{plusAntiguedadDiario.toFixed(2)} €/día</span></div>
-         </div>
+        <div className="flex justify-between items-center border-b border-green-200 pb-3">
+          <p className="text-xs font-bold text-green-900 uppercase tracking-widest">Simulador de Tramos de Antigüedad (Art. 12)</p>
+          <button onClick={() => setModoFecha(!modoFecha)} className="text-xs bg-white text-green-700 px-3 py-1.5 rounded-lg font-bold border border-green-300 shadow-sm">
+            {modoFecha ? 'Modo Años Cumplidos' : 'Modo Fecha de Alta'}
+          </button>
+        </div>
+        {!modoFecha ? (
+          <div className="flex items-center justify-center gap-4">
+            <button aria-label="Restar año de antigüedad" onClick={() => setAniosInput(clampNumber(aniosInput - 1, 0, 55))} className="bg-white w-12 h-12 rounded-xl border border-green-300 font-bold text-2xl text-green-800 shadow-sm">-</button>
+            <div className="text-center px-4"><span className="text-3xl font-black text-green-900">{aniosInput}</span><span className="text-xs font-bold block text-green-700 uppercase">Años Cumplidos</span></div>
+            <button aria-label="Sumar año de antigüedad" onClick={() => setAniosInput(clampNumber(aniosInput + 1, 0, 55))} className="bg-white w-12 h-12 rounded-xl border border-green-300 font-bold text-2xl text-green-800 shadow-sm">+</button>
+          </div>
+        ) : (
+          <div className="max-w-xs mx-auto">
+            <label className="block text-xs font-bold text-green-800 mb-1">Fecha de Alta en la Empresa:</label>
+            <input type="date" value={fechaAlta} onChange={e => setFechaAlta(e.target.value)} className="w-full p-3 bg-white border border-green-300 rounded-xl text-center font-bold text-green-900" />
+          </div>
+        )}
+        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 bg-white p-4 rounded-xl border border-green-200 text-center">
+          <div><span className="text-[10px] text-gray-400 font-bold uppercase block">Tramo Alcanzado</span><span className="font-bold text-gray-800 text-sm">{tramoActual}</span></div>
+          <div><span className="text-[10px] text-gray-400 font-bold uppercase block">% Salario Base</span><span className="font-mono font-black text-green-600 text-lg">+{porcentaje}%</span></div>
+          <div className="col-span-2 md:col-span-1"><span className="text-[10px] text-gray-400 font-bold uppercase block">Plus Diario Estimado (2026)</span><span className="font-mono font-black text-green-700 text-lg">+{plusAntiguedadDiario.toFixed(2)} €/día</span></div>
+        </div>
       </div>
 
       <div className="space-y-3">
@@ -2304,301 +2513,88 @@ const CalculoAntiguedad = memo(({ perfil }) => {
   );
 });
 
-const BuscadorConvenios = memo(() => {
-  return (
-    <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-6">
-      <h2 className="text-xl font-bold border-b border-gray-100 pb-3 text-gray-800 flex items-center"><Download className="mr-3 text-red-600 w-6 h-6" /> Convenios Colectivos y Marco Legal Directo</h2>
-      
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <a href="https://www.cgtvalencia.org/wp-content/uploads/2026/06/convenio-2018-2027-FCC-TERMINADO-2.pdf" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center p-6 bg-red-50 border border-red-200 hover:bg-red-100 transition rounded-2xl text-red-700 shadow-sm text-center group">
-          <FileText className="w-10 h-10 mb-3 group-hover:scale-110 transition-transform" />
-          <span className="font-black text-sm">Descargar Convenio FCC 2022-2027 (PDF)</span>
-          <span className="text-[10px] text-red-500 font-bold mt-1">Texto Oficial Completo CGT</span>
-        </a>
-
-        <a href="https://bop.dival.es/bop/" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center p-6 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition rounded-2xl text-blue-700 shadow-sm text-center group">
-          <ExternalLink className="w-10 h-10 mb-3 group-hover:scale-110 transition-transform" />
-          <span className="font-black text-sm">Boletín Oficial Valencia (BOP)</span>
-          <span className="text-[10px] text-blue-500 font-bold mt-1">Publicaciones Oficiales</span>
-        </a>
-
-        <a href="https://www.boe.es/buscar/act.php?id=BOE-A-2015-11430" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center p-6 bg-green-50 border border-green-200 hover:bg-green-100 transition rounded-2xl text-green-700 shadow-sm text-center group">
-          <BookOpen className="w-10 h-10 mb-3 group-hover:scale-110 transition-transform" />
-          <span className="font-black text-sm">Estatuto de los Trabajadores (BOE)</span>
-          <span className="text-[10px] text-green-600 font-bold mt-1">Ley Marco Estatal</span>
-        </a>
-      </div>
-
-      <div className="bg-gray-50 p-5 rounded-2xl border border-gray-200">
-         <h3 className="font-bold text-gray-800 text-sm mb-2 flex items-center"><Info className="w-4 h-4 mr-2 text-purple-600"/> Jerarquía Legal de Aplicación</h3>
-         <p className="text-xs text-gray-600 leading-relaxed">
-           En la resolución de dudas laborales, el orden legal aplicable es: <strong>1º Convenio Colectivo FCC Valencia Zona Norte</strong> (siempre que mejore la ley) ➔ <strong>2º Convenio General Estatal del Sector de Limpieza Pública y Recogida</strong> ➔ <strong>3º Estatuto de los Trabajadores</strong>. Prevalece siempre la norma que resulte más favorable para la persona trabajadora.
-         </p>
-      </div>
+const BuscadorConvenios = memo(() => (
+  <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-6">
+    <h2 className="text-xl font-bold border-b border-gray-100 pb-3 text-gray-800 flex items-center"><Download className="mr-3 text-red-600 w-6 h-6" /> Convenios Colectivos y Marco Legal Directo</h2>
+    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+      <a href="https://www.cgtvalencia.org/wp-content/uploads/2026/06/convenio-2018-2027-FCC-TERMINADO-2.pdf" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center p-6 bg-red-50 border border-red-200 hover:bg-red-100 transition rounded-2xl text-red-700 shadow-sm text-center">
+        <FileText className="w-10 h-10 mb-3" /><span className="font-black text-sm">Descargar Convenio FCC 2022-2027 (PDF)</span>
+      </a>
+      <a href="https://bop.dival.es/bop/" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center p-6 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition rounded-2xl text-blue-700 shadow-sm text-center">
+        <ExternalLink className="w-10 h-10 mb-3" /><span className="font-black text-sm">Boletín Oficial Valencia (BOP)</span>
+      </a>
+      <a href="https://www.boe.es/buscar/act.php?id=BOE-A-2015-11430" target="_blank" rel="noopener noreferrer" className="flex flex-col items-center justify-center p-6 bg-green-50 border border-green-200 hover:bg-green-100 transition rounded-2xl text-green-700 shadow-sm text-center">
+        <BookOpen className="w-10 h-10 mb-3" /><span className="font-black text-sm">Estatuto de los Trabajadores (BOE)</span>
+      </a>
     </div>
-  );
-});
+  </div>
+));
 
 const VideotecaSindical = memo(() => {
   const videos = [
-    { 
-      id: '1', 
-      titulo: 'Estatuto de los Trabajadores: lo que debes saber', 
-      desc: 'Resumen rápido de los derechos básicos.',
-      fuente: 'CATÁLOGO CGT',
-      url: 'https://www.youtube.com/results?search_query=estatuto+de+los+trabajadores+cgt',
-      thumbnail: 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: '2', 
-      titulo: 'Entender la Nómina', 
-      desc: 'Aprende a leer los devengos y deducciones.',
-      fuente: 'CATÁLOGO CGT',
-      url: 'https://www.youtube.com/results?search_query=como+leer+nomina+fcc+cgt',
-      thumbnail: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: '3', 
-      titulo: 'Tipos de Despido e Indemnizaciones', 
-      desc: 'Información vital sobre finiquitos.',
-      fuente: 'CATÁLOGO CGT',
-      url: 'https://www.youtube.com/results?search_query=tipos+de+despido+cgt',
-      thumbnail: 'https://images.unsplash.com/photo-1450133064473-71024230f91b?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: '4', 
-      titulo: 'Ley de Prevención de Riesgos Laborales', 
-      desc: 'Audio de la normativa de seguridad e higiene.',
-      fuente: 'CATÁLOGO CGT',
-      url: 'https://www.youtube.com/results?search_query=prevencion+riesgos+laborales+cgt',
-      thumbnail: 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=800&q=80'
-    },
-    { 
-      id: '5', 
-      titulo: 'Estatuto Trabajadores (Audio Ley Completa)', 
-      desc: 'Audio oficial del Estatuto.',
-      fuente: 'CATÁLOGO CGT',
-      url: 'https://www.youtube.com/results?search_query=estatuto+trabajadores+audio+cgt',
-      thumbnail: 'https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=800&q=80'
-    }
+    { id: '1', titulo: 'Estatuto de los Trabajadores: lo que debes saber', desc: 'Resumen rápido de los derechos básicos.', fuente: 'CATÁLOGO CGT', url: 'https://www.youtube.com/results?search_query=estatuto+de+los+trabajadores+cgt', thumbnail: 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?auto=format&fit=crop&w=800&q=80' },
+    { id: '2', titulo: 'Entender la Nómina', desc: 'Aprende a leer los devengos y deducciones.', fuente: 'CATÁLOGO CGT', url: 'https://www.youtube.com/results?search_query=como+leer+nomina+fcc+cgt', thumbnail: 'https://images.unsplash.com/photo-1554224155-8d04cb21cd6c?auto=format&fit=crop&w=800&q=80' },
+    { id: '3', titulo: 'Tipos de Despido e Indemnizaciones', desc: 'Información vital sobre finiquitos.', fuente: 'CATÁLOGO CGT', url: 'https://www.youtube.com/results?search_query=tipos+de+despido+cgt', thumbnail: 'https://images.unsplash.com/photo-1450133064473-71024230f91b?auto=format&fit=crop&w=800&q=80' },
+    { id: '4', titulo: 'Ley de Prevención de Riesgos Laborales', desc: 'Audio de la normativa de seguridad e higiene.', fuente: 'CATÁLOGO CGT', url: 'https://www.youtube.com/results?search_query=prevencion+riesgos+laborales+cgt', thumbnail: 'https://images.unsplash.com/photo-1504307651254-35680f356dfd?auto=format&fit=crop&w=800&q=80' },
+    { id: '5', titulo: 'Estatuto Trabajadores (Audio Ley Completa)', desc: 'Audio oficial del Estatuto.', fuente: 'CATÁLOGO CGT', url: 'https://www.youtube.com/results?search_query=estatuto+trabajadores+audio+cgt', thumbnail: 'https://images.unsplash.com/photo-1455390582262-044cdead277a?auto=format&fit=crop&w=800&q=80' }
   ];
-
   const [activeVideo, setActiveVideo] = useState(videos[0]);
-  const [filterQuery, setFilterQuery] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
 
-  const handleSearchYoutube = () => {
-    if (!searchQuery.trim()) return;
-    window.open(`https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`, '_blank');
-  };
-
-  const filteredCatalog = videos.filter(v => 
-    v.titulo.toLowerCase().includes(filterQuery.toLowerCase()) || 
-    v.desc.toLowerCase().includes(filterQuery.toLowerCase())
-  );
-
   return (
-    <div className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-3xl shadow-2xl space-y-6 text-white font-sans">
-      
+    <div className="bg-slate-900 border border-slate-800 p-6 md:p-8 rounded-3xl shadow-2xl space-y-6 text-white font-sans no-invert">
       <div className="border-b border-slate-800 pb-4">
-        <h2 className="text-xl md:text-2xl font-black flex items-center gap-3 text-white">
-          <Play className="w-6 h-6 text-red-500 fill-red-500" /> Videoteca y Buscador
-        </h2>
-        <p className="text-xs md:text-sm text-slate-400 mt-1">
-          Busca en nuestro catálogo curado o utiliza el buscador integrado para explorar en Youtube de forma segura.
-        </p>
+        <h2 className="text-xl md:text-2xl font-black flex items-center gap-3 text-white"><Play className="w-6 h-6 text-red-500 fill-red-500" /> Videoteca y Buscador</h2>
       </div>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        <a 
-          href="https://www.youtube.com/results?search_query=cgt+valencia" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="flex items-center justify-center gap-2 bg-[#8b0000] hover:bg-red-800 text-white font-bold py-3 px-4 rounded-xl shadow-md border border-red-900 transition text-sm"
-        >
-          <Globe className="w-4 h-4" /> CGT Valencia
-        </a>
-        <a 
-          href="https://www.youtube.com/results?search_query=cgt+espa%C3%B1a" 
-          target="_blank" 
-          rel="noopener noreferrer"
-          className="flex items-center justify-center gap-2 bg-black hover:bg-slate-950 text-white font-bold py-3 px-4 rounded-xl shadow-md border border-slate-800 transition text-sm"
-        >
-          <YoutubeIcon className="w-4 h-4 text-red-500" /> CGT España
-        </a>
-      </div>
-
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         <div className="lg:col-span-7 flex flex-col space-y-4">
-          <div className="bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl relative group">
-            <div className="relative aspect-video w-full overflow-hidden flex items-center justify-center">
-              <img 
-                src={activeVideo.thumbnail} 
-                alt={activeVideo.titulo} 
-                className="w-full h-full object-cover opacity-40 group-hover:scale-105 transition-transform duration-500"
-              />
-              <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/40 to-transparent"></div>
-              
-              <div className="absolute inset-0 p-6 flex flex-col items-center justify-center text-center z-10 space-y-3">
-                <YoutubeIcon className="w-16 h-16 text-red-600 drop-shadow-2xl" />
-                <h3 className="text-lg md:text-xl font-black text-white px-2 max-w-md drop-shadow">
-                  {activeVideo.titulo}
-                </h3>
-                <a 
-                  href={activeVideo.url} 
-                  target="_blank" 
-                  rel="noopener noreferrer"
-                  className="bg-[#E3000F] hover:bg-red-700 text-white font-black px-6 py-3 rounded-xl shadow-xl flex items-center gap-2 text-sm transition transform active:scale-95"
-                >
-                  <Play className="w-4 h-4 fill-white" /> Reproducir Vídeo Seguro
-                </a>
-                <p className="text-[10px] text-slate-400 font-bold tracking-widest uppercase mt-1">
-                  ABRE EN LA APP OFICIAL DE YOUTUBE
-                </p>
-              </div>
-            </div>
-
-            <div className="bg-slate-900/90 p-4 border-t border-slate-800">
-              <h4 className="font-bold text-sm text-white">{activeVideo.titulo}</h4>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mt-1 flex items-center gap-1.5">
-                <YoutubeIcon className="w-3.5 h-3.5 text-red-500" /> FUENTE: {activeVideo.fuente}
-              </p>
-            </div>
+          <div className="bg-slate-950 border border-slate-800 rounded-2xl overflow-hidden shadow-2xl relative aspect-video flex flex-col items-center justify-center p-6 text-center">
+            <YoutubeIcon className="w-16 h-16 text-red-600 mb-3" />
+            <h3 className="text-lg font-black text-white mb-4">{activeVideo.titulo}</h3>
+            <a href={activeVideo.url} target="_blank" rel="noopener noreferrer" className="bg-[#E3000F] hover:bg-red-700 text-white font-black px-6 py-3 rounded-xl shadow-xl flex items-center gap-2 text-sm">
+              <Play className="w-4 h-4 fill-white" /> Reproducir Vídeo Seguro
+            </a>
           </div>
-
           <div className="flex gap-2 bg-slate-950 p-2 rounded-xl border border-slate-800">
-            <div className="relative flex-1 flex items-center">
-              <Search className="w-4 h-4 text-slate-500 absolute left-3" />
-              <input 
-                type="text" 
-                placeholder="Busca cualquier otro tema general..." 
-                value={searchQuery}
-                onChange={e => setSearchQuery(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && handleSearchYoutube()}
-                className="w-full pl-9 pr-3 py-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-600"
-              />
-            </div>
-            <button 
-              onClick={handleSearchYoutube}
-              className="bg-[#E3000F] hover:bg-red-700 text-white font-bold px-5 py-2.5 rounded-lg text-xs flex items-center gap-1.5 transition"
-            >
-              <Search className="w-3.5 h-3.5" /> Buscar
+            <input type="text" placeholder="Busca en YouTube..." value={searchQuery} onChange={e => setSearchQuery(e.target.value)} className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-xs text-white" />
+            <button onClick={() => searchQuery.trim() && window.open(`https://www.youtube.com/results?search_query=${encodeURIComponent(searchQuery)}`, '_blank')} className="bg-[#E3000F] text-white font-bold px-5 py-2 rounded-lg text-xs">Buscar</button>
+          </div>
+        </div>
+        <div className="lg:col-span-5 bg-slate-950 border border-slate-800 rounded-2xl p-4 space-y-2">
+          <h3 className="font-black text-xs text-slate-200 uppercase mb-2">CATÁLOGO INTERNO</h3>
+          {videos.map(item => (
+            <button key={item.id} onClick={() => setActiveVideo(item)} className={`w-full text-left p-3 rounded-xl transition border ${activeVideo.id === item.id ? 'bg-[#7a0a0a] border-red-600 text-white' : 'bg-slate-900/80 border-slate-800 text-slate-300'}`}>
+              <p className="font-bold text-xs">{item.titulo}</p>
+              <p className="text-[10px] mt-1 opacity-80">{item.desc}</p>
             </button>
-          </div>
+          ))}
         </div>
-
-        <div className="lg:col-span-5 bg-slate-950 border border-slate-800 rounded-2xl p-4 flex flex-col">
-          <div className="flex items-center gap-2 mb-3 pb-2 border-b border-slate-800">
-            <span className="text-slate-300">📺</span>
-            <h3 className="font-black text-xs text-slate-200 uppercase tracking-wider">CATÁLOGO INTERNO</h3>
-          </div>
-
-          <input 
-            type="text" 
-            placeholder="Filtrar catálogo curado..." 
-            value={filterQuery}
-            onChange={e => setFilterQuery(e.target.value)}
-            className="w-full p-2.5 bg-slate-900 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-red-600 mb-3"
-          />
-
-          <div className="space-y-2 max-h-[380px] overflow-y-auto pr-1 custom-scrollbar flex-1">
-            {filteredCatalog.map(item => {
-              const isActive = activeVideo.id === item.id;
-              return (
-                <button
-                  key={item.id}
-                  onClick={() => setActiveVideo(item)}
-                  className={`w-full text-left p-3 rounded-xl transition border ${
-                    isActive 
-                      ? 'bg-[#7a0a0a] border-red-600 text-white shadow-lg' 
-                      : 'bg-slate-900/80 border-slate-800/80 text-slate-300 hover:bg-slate-900 hover:text-white'
-                  }`}
-                >
-                  <p className="font-bold text-xs">{item.titulo}</p>
-                  <p className={`text-[10px] mt-1 ${isActive ? 'text-red-200' : 'text-slate-400'}`}>{item.desc}</p>
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
       </div>
-
     </div>
   );
 });
 
 const ModalNotificaciones = memo(function ModalNotificaciones({ onClose, isDia28, setActiveTab }) {
-  const [tab, setTab] = useState('nominas');
-
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[100] flex items-center justify-center p-4 animate-fadeIn no-print">
-      <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 relative max-h-[85vh] flex flex-col">
+    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm z-[100] flex items-center justify-center p-4 animate-fadeIn no-print" role="dialog" aria-modal="true" aria-label="Centro de Notificaciones CGT">
+      <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-4 relative">
         <div className="flex justify-between items-center border-b border-gray-100 pb-3">
-          <h3 className="font-black text-gray-800 text-base uppercase flex items-center gap-2">
-            <Bell className="w-5 h-5 text-red-600" /> Centro de Notificaciones CGT
-          </h3>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1">
-            <X className="w-5 h-5" />
-          </button>
+          <h3 className="font-black text-gray-800 text-base uppercase flex items-center gap-2"><Bell className="w-5 h-5 text-red-600" /> Centro de Notificaciones CGT</h3>
+          <button aria-label="Cerrar notificaciones" onClick={onClose} className="text-gray-400 hover:text-gray-600 p-1"><X className="w-5 h-5" /></button>
         </div>
-
-        <div className="flex bg-gray-100 p-1 rounded-xl text-xs font-bold gap-1">
-          <button onClick={() => setTab('nominas')} className={`flex-1 py-2 rounded-lg transition ${tab === 'nominas' ? 'bg-red-600 text-white shadow' : 'text-gray-600'}`}>
-            Nóminas
-          </button>
-          <button onClick={() => setTab('pildoras')} className={`flex-1 py-2 rounded-lg transition ${tab === 'pildoras' ? 'bg-red-600 text-white shadow' : 'text-gray-600'}`}>
-            Píldoras Legales
-          </button>
-          <button onClick={() => setTab('avisos')} className={`flex-1 py-2 rounded-lg transition ${tab === 'avisos' ? 'bg-red-600 text-white shadow' : 'text-gray-600'}`}>
-            Asambleas CGT
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto space-y-3 pr-1 custom-scrollbar">
-          {tab === 'nominas' && (
-            <div className="space-y-3">
-              {isDia28 ? (
-                <div className="bg-red-50 border border-red-200 p-4 rounded-2xl">
-                  <span className="text-[10px] font-black bg-red-600 text-white px-2 py-0.5 rounded-full uppercase">Alerta Activa</span>
-                  <h4 className="font-bold text-red-900 mt-2 text-sm">Publicación de Recibos Mensuales 2026</h4>
-                  <p className="text-xs text-red-800 mt-1">Hoy es día {new Date().getDate()}. Las nóminas ya deberían estar subidas en la plataforma Iris FCC. Accede al Portal del Empleado para auditarla con nuestra IA basada en las tablas de 2026.</p>
-                  <button onClick={() => { onClose(); setActiveTab('portal'); }} className="mt-3 bg-red-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg shadow">
-                    Ir a Iris FCC
-                  </button>
-                </div>
-              ) : (
-                <div className="bg-gray-50 border border-gray-200 p-4 rounded-2xl text-xs text-gray-600">
-                  <p className="font-bold text-gray-800">Próxima Alerta de Nóminas</p>
-                  <p className="mt-1">El día 28 de este mes se activará el aviso para comprobar la subida de los recibos de salarios.</p>
-                </div>
-              )}
+        <div className="space-y-3">
+          {isDia28 ? (
+            <div className="bg-red-50 border border-red-200 p-4 rounded-2xl">
+              <span className="text-[10px] font-black bg-red-600 text-white px-2 py-0.5 rounded-full uppercase">Alerta Activa</span>
+              <h4 className="font-bold text-red-900 mt-2 text-sm">Publicación de Recibos Mensuales 2026</h4>
+              <p className="text-xs text-red-800 mt-1">Las nóminas ya deberían estar subidas en Iris FCC.</p>
+              <button onClick={() => { onClose(); setActiveTab('portal'); }} className="mt-3 bg-red-600 text-white font-bold text-xs px-3 py-1.5 rounded-lg">Ir a Iris FCC</button>
             </div>
-          )}
-
-          {tab === 'pildoras' && (
-            <div className="space-y-3">
-              <div className="bg-blue-50 border border-blue-200 p-4 rounded-2xl">
-                <span className="text-[10px] font-black bg-blue-600 text-white px-2 py-0.5 rounded-full uppercase">Píldora Legal #1</span>
-                <h4 className="font-bold text-blue-900 mt-2 text-sm">Derecho a Asuntos Propios</h4>
-                <p className="text-xs text-blue-800 mt-1">¿Sabías que tienes derecho a 3 días retribuidos al año de asuntos propios sin justificar por convenio colectivo FCC?</p>
-              </div>
-
-              <div className="bg-purple-50 border border-purple-200 p-4 rounded-2xl">
-                <span className="text-[10px] font-black bg-purple-600 text-white px-2 py-0.5 rounded-full uppercase">Píldora Legal #2</span>
-                <h4 className="font-bold text-purple-900 mt-2 text-sm">Horas Extras y Descansos</h4>
-                <p className="text-xs text-purple-800 mt-1">El descanso entre jornadas laborables debe ser como mínimo de 12 horas consecutivas por Ley.</p>
-              </div>
-            </div>
-          )}
-
-          {tab === 'avisos' && (
-            <div className="space-y-3">
-              <div className="bg-amber-50 border border-amber-200 p-4 rounded-2xl">
-                <span className="text-[10px] font-black bg-amber-600 text-white px-2 py-0.5 rounded-full uppercase">Asamblea Informativa</span>
-                <h4 className="font-bold text-amber-900 mt-2 text-sm">Negociación de Acuerdos 2026</h4>
-                <p className="text-xs text-amber-800 mt-1">Sigue atento a las convocatorias de la sección sindical de CGT para participar en las decisiones colectivas.</p>
-              </div>
+          ) : (
+            <div className="bg-blue-50 border border-blue-200 p-4 rounded-2xl">
+              <span className="text-[10px] font-black bg-blue-600 text-white px-2 py-0.5 rounded-full uppercase">Píldora Legal</span>
+              <h4 className="font-bold text-blue-900 mt-2 text-sm">Derecho a Asuntos Propios</h4>
+              <p className="text-xs text-blue-800 mt-1">Recuerda que tienes derecho a 3 días retribuidos al año de asuntos propios sin justificar por convenio colectivo FCC.</p>
             </div>
           )}
         </div>
@@ -2613,48 +2609,22 @@ const AsistenteVozFlotante = memo(function AsistenteVozFlotante({ apiKey, catego
   const [transcript, setTranscript] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
   const [responseText, setResponseText] = useState('');
-  const [isSpeaking, setIsSpeaking] = useState(false);
   const recognitionRef = useRef(null);
 
   useEffect(() => {
-    if ('speechSynthesis' in window) {
-      window.speechSynthesis.onvoiceschanged = () => window.speechSynthesis.getVoices();
-      window.speechSynthesis.getVoices();
-    }
-
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (SpeechRecognition) {
       const recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = true;
       recognition.lang = 'es-ES';
-
       recognition.onresult = (event) => {
         let currentText = '';
-        for (let i = event.resultIndex; i < event.results.length; ++i) {
-          currentText += event.results[i][0].transcript;
-        }
+        for (let i = event.resultIndex; i < event.results.length; ++i) currentText += event.results[i][0].transcript;
         setTranscript(currentText);
       };
-
-      recognition.onerror = (event) => {
-        setIsListening(false);
-        if (event.error === 'no-speech') {
-          setResponseText('No se ha detectado sonido de voz. Pulsa el micrófono e inténtalo de nuevo.');
-          return;
-        }
-        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
-          setResponseText('Permiso de micrófono no concedido en tu navegador. Puedes escribir o dictar con el teclado abajo.');
-          return;
-        }
-        if (event.error === 'aborted') return;
-        console.warn("Aviso de reconocimiento de voz:", event.error);
-      };
-
-      recognition.onend = () => {
-        setIsListening(false);
-      };
-
+      recognition.onerror = () => setIsListening(false);
+      recognition.onend = () => setIsListening(false);
       recognitionRef.current = recognition;
     }
   }, []);
@@ -2664,173 +2634,69 @@ const AsistenteVozFlotante = memo(function AsistenteVozFlotante({ apiKey, catego
     window.speechSynthesis.cancel();
     const utterance = new SpeechSynthesisUtterance(texto);
     utterance.lang = 'es-ES';
-    utterance.rate = 1.0;
-    
-    // Búsqueda de voz masculina en español de España
-    const voices = window.speechSynthesis.getVoices();
-    let maleVoice = voices.find(v => 
-      v.lang.startsWith('es') && 
-      (v.name.includes('Pablo') || v.name.includes('Jorge') || v.name.includes('Diego') || v.name.includes('Enrique') || /male/i.test(v.name) || /hombre/i.test(v.name))
-    );
-    if (!maleVoice) maleVoice = voices.find(v => v.lang === 'es-ES' && !v.name.includes('Monica') && !v.name.includes('Helena') && !v.name.includes('Laura') && !v.name.includes('Marisol'));
-    if (!maleVoice) maleVoice = voices.find(v => v.lang.startsWith('es'));
-    if (maleVoice) utterance.voice = maleVoice;
-
-    utterance.onstart = () => setIsSpeaking(true);
-    utterance.onend = () => setIsSpeaking(false);
-    utterance.onerror = () => setIsSpeaking(false);
     window.speechSynthesis.speak(utterance);
   };
 
-  const detenerVoz = () => {
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    setIsSpeaking(false);
-  };
-
-  const toggleEscucha = async () => {
-    detenerVoz();
+  const toggleEscucha = () => {
     if (isListening) {
       recognitionRef.current?.stop();
       setIsListening(false);
     } else {
       setTranscript('');
       setResponseText('');
-
-      if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-        try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach(track => track.stop());
-        } catch (e) {
-          console.warn("Permiso de micrófono no concedido directamente:", e);
-        }
-      }
-
       if (recognitionRef.current) {
-        try {
-          recognitionRef.current.start();
-          setIsListening(true);
-        } catch (err) {
-          console.error("No se pudo iniciar el micro:", err);
-          setIsListening(false);
-        }
+        try { recognitionRef.current.start(); setIsListening(true); } catch (e) {}
       } else {
-        setResponseText("Tu navegador no soporta voz directa. Puedes escribir o usar la dictación por voz de tu teclado abajo.");
+        setResponseText("Escribe tu consulta abajo.");
       }
     }
   };
 
-  const procesarPeticion = async (textoAProcesar) => {
-    const txt = textoAProcesar || transcript;
-    if (!txt.trim()) return;
-
+  const procesarPeticion = async () => {
+    if (!transcript.trim()) return;
     setIsProcessing(true);
-    detenerVoz();
-
     if (!apiKey) {
-      const msgNoKey = "Hola compañero. Para usar las funciones avanzadas por voz, configura tu clave API en la sección 'Consultas Convenio IA'. ¡Es totalmente gratis!";
-      setResponseText(msgNoKey);
-      hablarTexto(msgNoKey);
+      const msg = "Configura tu clave API en la sección 'Consultas Convenio IA'.";
+      setResponseText(msg);
+      hablarTexto(msg);
       setIsProcessing(false);
       return;
     }
-
-    const resJSON = await parseVoiceCommandWithGemini(txt, apiKey, categoriasDisponibles);
-
+    const resJSON = await parseVoiceCommandWithGemini(transcript, apiKey, categoriasDisponibles);
     if (resJSON) {
-      onExecuteAction(resJSON, txt);
+      onExecuteAction(resJSON, transcript);
       if (resJSON.spokenResponse) {
         setResponseText(resJSON.spokenResponse);
         hablarTexto(resJSON.spokenResponse);
       }
-    } else {
-      const msgError = "No he podido entender la orden. Intenta decir por ejemplo: 'Soy peón de limpieza día y he hecho 5 días de peón recogida noche'.";
-      setResponseText(msgError);
-      hablarTexto(msgError);
     }
-
     setIsProcessing(false);
   };
 
   return (
     <div className="fixed bottom-[132px] md:bottom-8 right-4 md:right-8 z-[110] no-print">
-      
       {isOpen && (
         <div className="mb-3 w-80 md:w-96 bg-slate-900 border border-slate-700 text-white rounded-2xl p-5 shadow-2xl animate-fadeIn no-invert">
           <div className="flex justify-between items-center border-b border-slate-800 pb-3 mb-3">
-            <div className="flex items-center gap-2">
-              <div className="p-2 bg-purple-600 rounded-xl text-white">
-                <Sparkles className="w-4 h-4 animate-pulse" />
-              </div>
-              <div>
-                <h4 className="font-bold text-sm leading-none">Control por Voz e IA (2026)</h4>
-                <p className="text-[10px] text-purple-300 font-semibold mt-0.5">Gemini Multimodal Directo</p>
-              </div>
-            </div>
-            <button onClick={() => { setIsOpen(false); detenerVoz(); }} className="text-slate-400 hover:text-white text-xs font-bold px-2 py-1 bg-slate-800 rounded-lg">Cerrar</button>
+            <h4 className="font-bold text-sm flex items-center gap-2"><Sparkles className="w-4 h-4 text-purple-400" /> Control por Voz e IA (2026)</h4>
+            <button onClick={() => setIsOpen(false)} className="text-slate-400 hover:text-white text-xs font-bold px-2 py-1 bg-slate-800 rounded-lg">Cerrar</button>
           </div>
-
           <div className="space-y-3">
-            <div className="bg-slate-950 p-3.5 rounded-xl border border-slate-800 min-h-[80px] flex flex-col justify-between">
-              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-wider mb-1">Tu consulta o dictado por voz:</p>
-              <textarea
-                value={transcript}
-                onChange={(e) => setTranscript(e.target.value)}
-                placeholder={isListening ? "Escuchando tu voz..." : "Habla por el micro o escribe/dicta tu consulta..."}
-                className="w-full bg-transparent text-xs text-slate-200 font-medium outline-none resize-none border-none p-0 focus:ring-0"
-                rows={2}
-              />
-              {isListening && (
-                <div className="flex gap-1 items-center mt-2 justify-center">
-                  <span className="w-1.5 h-3 bg-red-500 animate-bounce rounded-full"></span>
-                  <span className="w-1.5 h-5 bg-red-500 animate-bounce rounded-full [animation-delay:0.2s]"></span>
-                  <span className="w-1.5 h-3 bg-red-500 animate-bounce rounded-full [animation-delay:0.4s]"></span>
-                </div>
-              )}
-            </div>
-
-            {responseText && (
-              <div className="bg-purple-950/80 border border-purple-800/80 p-3.5 rounded-xl space-y-2">
-                <div className="flex items-center justify-between">
-                  <span className="text-[10px] font-bold text-purple-300 uppercase tracking-wider flex items-center gap-1">
-                    <Bot className="w-3.5 h-3.5 text-purple-400"/> Respuesta Asistente
-                  </span>
-                  {isSpeaking && (
-                    <button onClick={detenerVoz} className="text-purple-300 hover:text-white">
-                      <VolumeX className="w-3.5 h-3.5"/>
-                    </button>
-                  )}
-                </div>
-                <p className="text-xs text-purple-100 font-serif leading-relaxed">
-                  {responseText}
-                </p>
-              </div>
-            )}
-
+            <textarea value={transcript} onChange={(e) => setTranscript(e.target.value)} placeholder="Habla por el micro o escribe tu orden..." className="w-full bg-slate-950 p-3 rounded-xl border border-slate-800 text-xs text-slate-200 outline-none resize-none" rows={2} />
+            {responseText && <div className="bg-purple-950/80 border border-purple-800 p-3 rounded-xl text-xs text-purple-100">{responseText}</div>}
             <div className="flex gap-2">
-              <button 
-                onClick={toggleEscucha} 
-                className={`flex-1 py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 shadow-md transition-all active:scale-95 ${isListening ? 'bg-red-600 text-white animate-pulse' : 'bg-purple-600 hover:bg-purple-500 text-white'}`}
-              >
+              <button onClick={toggleEscucha} className={`flex-1 py-3 px-4 rounded-xl font-bold text-xs flex items-center justify-center gap-2 text-white ${isListening ? 'bg-red-600 animate-pulse' : 'bg-purple-600'}`}>
                 {isListening ? <><MicOff className="w-4 h-4"/> Parar</> : <><Mic className="w-4 h-4"/> Hablar Ahora</>}
               </button>
-              
-              <button 
-                onClick={() => procesarPeticion()} 
-                disabled={isProcessing || !transcript.trim()} 
-                className="bg-slate-800 hover:bg-slate-700 disabled:opacity-40 text-white p-3 rounded-xl font-bold text-xs flex items-center justify-center"
-              >
+              <button aria-label="Procesar orden de voz" onClick={procesarPeticion} disabled={isProcessing || !transcript.trim()} className="bg-slate-800 text-white p-3 rounded-xl">
                 {isProcessing ? <Loader2 className="w-4 h-4 animate-spin text-purple-400" /> : <Send className="w-4 h-4" />}
               </button>
             </div>
           </div>
         </div>
       )}
-
-      <button 
-        onClick={() => setIsOpen(!isOpen)} 
-        className={`p-3.5 rounded-full shadow-2xl transition-all duration-300 flex items-center justify-center border-2 active:scale-90 ${isOpen ? 'bg-slate-900 border-purple-500 text-purple-400 scale-105' : 'bg-gradient-to-r from-purple-600 to-indigo-600 border-white text-white hover:scale-110'}`}
-      >
-        <Mic className="w-5 h-5 animate-pulse" />
+      <button aria-label="Abrir asistente de control por voz" onClick={() => setIsOpen(!isOpen)} className="p-3.5 rounded-full shadow-2xl flex items-center justify-center border-2 bg-gradient-to-r from-purple-600 to-indigo-600 border-white text-white hover:scale-110 transition">
+        <Mic className="w-5 h-5" />
       </button>
     </div>
   );
@@ -2842,107 +2708,36 @@ export default function App() {
   const [showMobileMore, setShowMobileMore] = useState(false);
   const [darkMode, setDarkMode] = useState(() => localStorage.getItem('cgt_dark_mode') === 'true');
   const [showNotificationModal, setShowNotificationModal] = useState(false);
-  const [deferredPrompt, setDeferredPrompt] = useState(null);
   const [voiceCommandToAudit, setVoiceCommandToAudit] = useState(null);
-  
-  const [apiKey, setApiKey] = useState(() => localStorage.getItem('cgt_gemini_api_key') || '');
-
-  const [voiceCalcData, setVoiceCalcData] = useState({
-    categoriaBase: null,
-    categoriaSuperior: null,
-    dias: null,
-    bivolante: null,
-    porter: null
-  });
+  const [apiKey, setApiKey] = useState(() => sessionStorage.getItem('cgt_gemini_api_key_session') || localStorage.getItem('cgt_gemini_api_key') || '');
+  const [voiceCalcData, setVoiceCalcData] = useState({ categoriaBase: null, categoriaSuperior: null, dias: null, bivolante: null, porter: null });
 
   const [perfil, setPerfil] = useState(() => {
-    const guardado = localStorage.getItem('cgt_perfil_usuario');
-    return guardado ? JSON.parse(guardado) : {
-      categoria: 'Peón limpieza día',
-      categoriaSuperior: 'Peón recogida día',
-      turno: 'DIA',
-      fechaIngreso: '2015-01-01',
-      bivolante: false,
-      porter: false
-    };
+    try {
+      const guardado = localStorage.getItem('cgt_perfil_usuario');
+      return guardado ? JSON.parse(guardado) : {
+        categoria: 'Peón limpieza día',
+        categoriaSuperior: 'Peón recogida día',
+        turno: 'DIA',
+        fechaIngreso: '2015-01-01',
+        bivolante: false,
+        porter: false
+      };
+    } catch (e) {
+      return {
+        categoria: 'Peón limpieza día',
+        categoriaSuperior: 'Peón recogida día',
+        turno: 'DIA',
+        fechaIngreso: '2015-01-01',
+        bivolante: false,
+        porter: false
+      };
+    }
   });
-
-  useEffect(() => {
-    const manifestObj = {
-      name: "CGT Ayuda FCC",
-      short_name: "CGT Ayuda",
-      start_url: ".",
-      display: "standalone",
-      background_color: "#0f172a",
-      theme_color: "#dc2626",
-      icons: [{ src: "/5.png", sizes: "192x192 512x512", type: "image/png" }]
-    };
-    const stringManifest = JSON.stringify(manifestObj);
-    const blob = new Blob([stringManifest], { type: 'application/json' });
-    const manifestURL = URL.createObjectURL(blob);
-    let linkTag = document.querySelector('link[rel="manifest"]');
-    if (!linkTag) {
-      linkTag = document.createElement('link');
-      linkTag.rel = 'manifest';
-      document.head.appendChild(linkTag);
-    }
-    linkTag.href = manifestURL;
-
-    if (!window.html2pdf) {
-      const script = document.createElement('script');
-      script.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js';
-      script.async = true;
-      document.head.appendChild(script);
-    }
-  }, []);
 
   useEffect(() => {
     localStorage.setItem('cgt_perfil_usuario', JSON.stringify(perfil));
   }, [perfil]);
-
-  useEffect(() => {
-    document.title = "CGT Ayuda FCC";
-    let viewportMeta = document.querySelector('meta[name="viewport"]');
-    if (!viewportMeta) {
-      viewportMeta = document.createElement('meta');
-      viewportMeta.setAttribute('name', 'viewport');
-      document.head.appendChild(viewportMeta);
-    }
-    viewportMeta.setAttribute('content', 'width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=0, shrink-to-fit=no');
-
-    const handleBeforeInstallPrompt = (e) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-    };
-    window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-
-    if ('serviceWorker' in navigator) {
-      try {
-        const swCode = `
-          const CACHE_NAME = 'cgt-offline-v1';
-          self.addEventListener('install', e => {
-            e.waitUntil(caches.open(CACHE_NAME).then(c => c.addAll(['/'])));
-          });
-          self.addEventListener('fetch', e => {
-            e.respondWith(caches.match(e.request).then(res => res || fetch(e.request)));
-          });
-        `;
-        const blob = new Blob([swCode], { type: 'application/javascript' });
-        navigator.serviceWorker.register(URL.createObjectURL(blob)).catch(() => {});
-      } catch (e) {}
-    }
-
-    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
-  }, []);
-
-  const handleInstallClick = () => {
-    if (deferredPrompt) {
-      deferredPrompt.prompt();
-      deferredPrompt.userChoice.then(() => {
-        setDeferredPrompt(null);
-      });
-    }
-  };
 
   const toggleDarkMode = () => {
     const newMode = !darkMode;
@@ -2954,130 +2749,62 @@ export default function App() {
 
   return (
     <div className={`flex h-[100dvh] font-sans overflow-hidden w-full relative print:bg-white print:h-auto print:overflow-visible ${darkMode ? 'bg-[#0f172a] text-slate-200' : 'bg-gray-50 text-gray-800'}`}>
-      
       {darkMode && (
         <style>{`
           .bg-white { background-color: #1e293b !important; border-color: #334155 !important; color: #f8fafc !important; }
-          .bg-gray-50, [class*="bg-[#fdfdfd]"] { background-color: #0f172a !important; border-color: #1e293b !important; color: #e2e8f0 !important; }
+          .bg-gray-50 { background-color: #0f172a !important; border-color: #1e293b !important; color: #e2e8f0 !important; }
           .bg-gray-100 { background-color: #334155 !important; border-color: #475569 !important; color: #f8fafc !important; }
-          .bg-gray-200 { background-color: #475569 !important; color: #f8fafc !important; }
-          
           .text-gray-800, .text-gray-900, .text-gray-700 { color: #f8fafc !important; }
           .text-gray-600, .text-gray-500 { color: #cbd5e1 !important; }
-          .text-gray-400 { color: #94a3b8 !important; }
-          
           .border-gray-100, .border-gray-200, .border-gray-300 { border-color: #334155 !important; }
-          
           input, select, textarea { background-color: #0f172a !important; color: #f8fafc !important; border-color: #334155 !important; }
-          
-          .bg-red-50 { background-color: #450a0a !important; border-color: #7f1d1d !important; color: #fca5a5 !important; }
-          .text-red-700, .text-red-800, .text-red-900 { color: #f87171 !important; }
-          .text-red-600 { color: #ef4444 !important; }
-          
-          .bg-blue-50 { background-color: #172554 !important; border-color: #1e3a8a !important; color: #bfdbfe !important; }
-          .text-blue-900, .text-blue-800 { color: #93c5fd !important; }
-          .text-blue-600, .text-blue-700 { color: #60a5fa !important; }
-          
-          .bg-green-50 { background-color: #052e16 !important; border-color: #14532d !important; color: #bbf7d0 !important; }
-          .text-green-800, .text-green-900 { color: #86efac !important; }
-          .text-green-600, .text-green-700 { color: #4ade80 !important; }
-          
-          .bg-purple-50 { background-color: #2e1065 !important; border-color: #4c1d95 !important; color: #e9d5ff !important; }
-          .text-purple-900, .text-purple-800 { color: #d8b4fe !important; }
-          .text-purple-600, .text-purple-700 { color: #c084fc !important; }
-          
-          .bg-amber-50, .bg-orange-50, .bg-yellow-50 { background-color: #451a03 !important; border-color: #78350f !important; color: #fcd34d !important; }
-          .text-amber-800, .text-amber-900 { color: #fcd34d !important; }
-          
-          .custom-scrollbar::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background: #0f172a !important; }
-          .custom-scrollbar::-webkit-scrollbar-thumb, body::-webkit-scrollbar-thumb { background: #334155 !important; }
           .no-invert { background-color: inherit; color: inherit; }
         `}</style>
       )}
 
-      <style>{`
-        @media print {
-          body * { visibility: hidden; }
-          .print-area, .print-area * { visibility: visible; }
-          .print-area { position: absolute; left: 0; top: 0; width: 100%; margin: 0; padding: 0; border: none; box-shadow: none; background: white; color: black; }
-          .no-print { display: none !important; }
-        }
-      `}</style>
-
       {/* MENÚ LATERAL ESCRITORIO */}
       <aside className="hidden md:flex flex-col w-72 bg-white border-r border-gray-200 z-20 shadow-lg flex-none shrink-0 no-print">
         <div className="p-5 bg-white border-b border-gray-200 flex flex-col items-center text-center shrink-0">
-          <div className="text-red-700 bg-red-50 p-4 rounded-full mb-3 border border-red-100">
-             <Shield size={40} />
-          </div>
+          <div className="text-red-700 bg-red-50 p-4 rounded-full mb-3 border border-red-100"><Shield size={40} /></div>
           <h1 className="text-xl font-black tracking-tight leading-tight text-red-700">CGT AYUDA</h1>
           <p className="text-gray-500 text-xs font-bold mt-1">FCC Zona Norte</p>
         </div>
         
         <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50 shrink-0">
-          <span className="text-[11px] font-bold text-gray-600 flex items-center w-fit shrink-0">
-            <Sparkles className="w-3.5 h-3.5 text-purple-500 mr-1.5 animate-pulse" /> IA Multimodal &amp; Voz
-          </span>
+          <span className="text-[11px] font-bold text-gray-600 flex items-center"><Sparkles className="w-3.5 h-3.5 text-purple-500 mr-1.5 animate-pulse" /> IA &amp; Voz</span>
           <div className="flex items-center gap-2">
-            {deferredPrompt && (
-              <button 
-                onClick={handleInstallClick} 
-                className="flex items-center gap-1.5 bg-green-600 text-white px-3 py-1.5 rounded-lg shadow-sm text-[11px] font-black transition-all active:scale-95 shrink-0 animate-pulse"
-                title="Instalar App"
-              >
-                <Download className="w-3.5 h-3.5" /> INSTALAR
-              </button>
-            )}
-            <button 
-              onClick={toggleDarkMode} 
-              className="flex items-center gap-1.5 bg-white border border-gray-200 px-3 py-1.5 rounded-lg shadow-sm text-[11px] font-black text-gray-700 hover:bg-gray-100 transition-all active:scale-95 shrink-0"
-            >
-              {darkMode ? <><Sun className="w-3.5 h-3.5 text-amber-500" /> MODO DÍA</> : <><Moon className="w-3.5 h-3.5 text-indigo-600" /> MODO OSCURO</>}
+            <button onClick={toggleDarkMode} className="flex items-center gap-1.5 bg-white border border-gray-200 px-3 py-1.5 rounded-lg shadow-sm text-[11px] font-black text-gray-700">
+              {darkMode ? <><Sun className="w-3.5 h-3.5 text-amber-500" /> DÍA</> : <><Moon className="w-3.5 h-3.5 text-indigo-600" /> NOCHE</>}
             </button>
-            <span className={`h-2.5 w-2.5 rounded-full shrink-0 ${apiKey ? 'bg-green-500 animate-pulse' : 'bg-yellow-400'}`}></span>
+            <span className={`h-2.5 w-2.5 rounded-full ${apiKey ? 'bg-green-500 animate-pulse' : 'bg-yellow-400'}`}></span>
           </div>
         </div>
 
         <nav className="flex-1 p-4 space-y-1.5 overflow-y-auto pb-4 custom-scrollbar">
-          <button onClick={() => setActiveTab('inicio')} className={`w-full flex items-center px-4 py-3 rounded-xl transition-all duration-200 ${activeTab === 'inicio' ? 'bg-gradient-to-r from-gray-900 to-black text-white shadow-md border border-gray-800 scale-[1.02]' : 'bg-gray-100 text-gray-700 hover:bg-gray-200 font-bold border border-gray-200'}`}>
-            <div className={`mr-3 ${activeTab === 'inicio' ? 'text-red-500' : 'text-gray-500'}`}><Home className="w-5 h-5" /></div>
-            <span>Inicio y Portada</span>
-          </button>
-          
-          <div className="space-y-1">
-            <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Área Personal</p>
-            <SidebarButton active={activeTab === 'perfil'} onClick={() => setActiveTab('perfil')} icon={<User />} text="Mi Perfil" />
-            <SidebarButton active={activeTab === 'cuadrante'} onClick={() => setActiveTab('cuadrante')} icon={<LayoutGrid />} text="Mi Cuadrante" />
-          </div>
-
-          <div className="space-y-1">
-            <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Calculadoras</p>
-            <SidebarButton active={activeTab === 'calculadoras' && activeCalcSubTab === 'diferencias'} onClick={() => { setActiveTab('calculadoras'); setActiveCalcSubTab('diferencias'); }} icon={<Calculator />} text="Diferencias Salariales" />
-            <SidebarButton active={activeTab === 'calculadoras' && activeCalcSubTab === 'horas_extras'} onClick={() => { setActiveTab('calculadoras'); setActiveCalcSubTab('horas_extras'); }} icon={<Timer />} text="Horas Extras" />
-            <SidebarButton active={activeTab === 'pagas'} onClick={() => setActiveTab('pagas')} icon={<Euro />} text="Pagas y Pluses" />
-            <SidebarButton active={activeTab === 'irpf'} onClick={() => setActiveTab('irpf')} icon={<Landmark />} text="Retenciones IRPF, ETC" />
-          </div>
-
-          <div className="space-y-1">
-            <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Herramientas IA</p>
-            <SidebarButton active={activeTab === 'auditoria'} onClick={() => setActiveTab('auditoria')} icon={<FileSearch className="text-purple-600" />} text="Auditar Mi Nómina" esEspecial={true} />
-            <SidebarButton active={activeTab === 'traductor'} onClick={() => setActiveTab('traductor')} icon={<BookType className="text-purple-600" />} text="Traductor Legal" esEspecial={true} />
-            <SidebarButton active={activeTab === 'redactor'} onClick={() => setActiveTab('redactor')} icon={<PenTool className="text-purple-600" />} text="Redactor Peticiones" esEspecial={true} />
-            <SidebarButton active={activeTab === 'asistente'} onClick={() => setActiveTab('asistente')} icon={<Bot className="text-purple-600" />} text="Consultas Convenio IA" esEspecial={true} />
-          </div>
-
-          <div className="space-y-1">
-            <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Información y Sindical</p>
-            <SidebarButton active={activeTab === 'portal'} onClick={() => setActiveTab('portal')} icon={<ExternalLink />} text="Portal del Empleado" />
-            <SidebarButton active={activeTab === 'afiliacion'} onClick={() => setActiveTab('afiliacion')} icon={<Heart className="text-red-600" />} text="Afíliate a CGT" />
-            <SidebarButton active={activeTab === 'permisos'} onClick={() => setActiveTab('permisos')} icon={<Briefcase />} text="Permisos y Licencias" />
-            <SidebarButton active={activeTab === 'jubilacion'} onClick={() => setActiveTab('jubilacion')} icon={<Award className="text-red-600 animate-pulse" />} text="Simulador Jubilación" esEspecial={true} />
-            <SidebarButton active={activeTab === 'antiguedad'} onClick={() => setActiveTab('antiguedad')} icon={<Calendar />} text="Antigüedad y Ayudas" />
-            <SidebarButton active={activeTab === 'buscador'} onClick={() => setActiveTab('buscador')} icon={<BookOpen />} text="Convenios Colectivos" />
-            <SidebarButton active={activeTab === 'videos'} onClick={() => setActiveTab('videos')} icon={<Play />} text="Videoteca Sindical" />
-          </div>
+          <SidebarButton active={activeTab === 'inicio'} onClick={() => setActiveTab('inicio')} icon={<Home />} text="Inicio y Portada" />
+          <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Área Personal</p>
+          <SidebarButton active={activeTab === 'perfil'} onClick={() => setActiveTab('perfil')} icon={<User />} text="Mi Perfil" />
+          <SidebarButton active={activeTab === 'cuadrante'} onClick={() => setActiveTab('cuadrante')} icon={<LayoutGrid />} text="Mi Cuadrante" />
+          <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Calculadoras</p>
+          <SidebarButton active={activeTab === 'calculadoras' && activeCalcSubTab === 'diferencias'} onClick={() => { setActiveTab('calculadoras'); setActiveCalcSubTab('diferencias'); }} icon={<Calculator />} text="Diferencias Salariales" />
+          <SidebarButton active={activeTab === 'calculadoras' && activeCalcSubTab === 'horas_extras'} onClick={() => { setActiveTab('calculadoras'); setActiveCalcSubTab('horas_extras'); }} icon={<Timer />} text="Horas Extras" />
+          <SidebarButton active={activeTab === 'pagas'} onClick={() => setActiveTab('pagas')} icon={<Euro />} text="Pagas y Pluses" />
+          <SidebarButton active={activeTab === 'irpf'} onClick={() => setActiveTab('irpf')} icon={<Landmark />} text="Retenciones IRPF, ETC" />
+          <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Herramientas IA</p>
+          <SidebarButton active={activeTab === 'auditoria'} onClick={() => setActiveTab('auditoria')} icon={<FileSearch className="text-purple-600" />} text="Auditar Mi Nómina" esEspecial={true} />
+          <SidebarButton active={activeTab === 'traductor'} onClick={() => setActiveTab('traductor')} icon={<BookType className="text-purple-600" />} text="Traductor Legal" esEspecial={true} />
+          <SidebarButton active={activeTab === 'redactor'} onClick={() => setActiveTab('redactor')} icon={<PenTool className="text-purple-600" />} text="Redactor Peticiones" esEspecial={true} />
+          <SidebarButton active={activeTab === 'asistente'} onClick={() => setActiveTab('asistente')} icon={<Bot className="text-purple-600" />} text="Consultas Convenio IA" esEspecial={true} />
+          <p className="px-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-2">Información y Sindical</p>
+          <SidebarButton active={activeTab === 'portal'} onClick={() => setActiveTab('portal')} icon={<ExternalLink />} text="Portal del Empleado" />
+          <SidebarButton active={activeTab === 'afiliacion'} onClick={() => setActiveTab('afiliacion')} icon={<Heart className="text-red-600" />} text="Afíliate a CGT" />
+          <SidebarButton active={activeTab === 'permisos'} onClick={() => setActiveTab('permisos')} icon={<Briefcase />} text="Permisos y Licencias" />
+          <SidebarButton active={activeTab === 'jubilacion'} onClick={() => setActiveTab('jubilacion')} icon={<Award className="text-red-600" />} text="Simulador Jubilación" esEspecial={true} />
+          <SidebarButton active={activeTab === 'antiguedad'} onClick={() => setActiveTab('antiguedad')} icon={<Calendar />} text="Antigüedad y Ayudas" />
+          <SidebarButton active={activeTab === 'buscador'} onClick={() => setActiveTab('buscador')} icon={<BookOpen />} text="Convenios Colectivos" />
+          <SidebarButton active={activeTab === 'videos'} onClick={() => setActiveTab('videos')} icon={<Play />} text="Videoteca Sindical" />
         </nav>
-        
+
         <div className="p-4 bg-orange-50 border-t border-orange-100 flex flex-col gap-2 shadow-inner shrink-0 no-print">
           <span className="text-[10px] font-black text-orange-800 uppercase tracking-widest flex items-center gap-1.5">
             <Radio className="w-4 h-4 text-orange-600 animate-pulse" /> Radio Clara Directo
@@ -3087,96 +2814,49 @@ export default function App() {
       </aside>
 
       {/* ÁREA PRINCIPAL */}
-      <div className="flex-1 flex flex-col h-full relative overflow-hidden bg-gray-50 w-full print:bg-white print:overflow-visible">
-        
+      <div className="flex-1 flex flex-col h-full relative overflow-hidden bg-gray-50 w-full">
         <div className="hidden md:flex items-center justify-between px-8 py-3 bg-white border-b border-gray-200 z-10 shrink-0 shadow-sm no-print">
           <div className="flex items-center gap-3">
             <span className="text-sm font-bold text-gray-800">{perfil.categoria}</span>
             <span className="text-gray-300">|</span>
             <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">Turno {perfil.turno}</span>
           </div>
-
-          <div className="flex items-center gap-3">
-            <button 
-              onClick={() => setShowNotificationModal(true)} 
-              className="relative p-2 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-700 transition"
-              title="Centro de Notificaciones"
-            >
-              <Bell className="w-5 h-5" />
-              {isDia28OrLater && (
-                <span className="absolute top-0 right-0 h-3 w-3 bg-red-600 rounded-full animate-ping"></span>
-              )}
-              <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">
-                {isDia28OrLater ? '3' : '2'}
-              </span>
-            </button>
-          </div>
+          <button aria-label="Abrir centro de notificaciones" onClick={() => setShowNotificationModal(true)} className="relative p-2 rounded-full bg-gray-100 hover:bg-gray-200 text-gray-700">
+            <Bell className="w-5 h-5" />
+            <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[9px] font-black px-1.5 py-0.5 rounded-full">{isDia28OrLater ? '3' : '2'}</span>
+          </button>
         </div>
 
-        <main className="flex-1 overflow-y-auto w-full relative print:overflow-visible custom-scrollbar">
-          
+        <main className="flex-1 overflow-y-auto w-full relative custom-scrollbar">
           {/* HEADER MÓVIL */}
-          <div className={`md:hidden pt-3 pb-3 px-4 flex items-center justify-between w-full mx-auto sticky top-0 z-30 border-b border-gray-200/80 shadow-sm no-print ${darkMode ? 'bg-[#0f172a]/95 text-white border-slate-800' : 'bg-gray-50/95 text-gray-900'}`}>
-            <div className={`flex items-center px-3 py-1.5 rounded-full shadow-sm border gap-2 cursor-pointer ${darkMode ? 'bg-slate-900 border-slate-700' : 'bg-white border-gray-200'}`} onClick={() => setActiveTab('inicio')}>
+          <div className={`md:hidden pt-3 pb-3 px-4 flex items-center justify-between w-full sticky top-0 z-30 border-b shadow-sm no-print ${darkMode ? 'bg-[#0f172a]/95 text-white border-slate-800' : 'bg-gray-50/95 text-gray-900 border-gray-200'}`}>
+            <div className="flex items-center px-3 py-1.5 rounded-full shadow-sm border bg-white border-gray-200 gap-2 cursor-pointer" onClick={() => setActiveTab('inicio')}>
               <Shield className="w-4 h-4 text-red-600" />
-              <h1 className="text-[11px] font-black text-red-600 tracking-tight leading-none mt-0.5">CGT AYUDA</h1>
+              <h1 className="text-[11px] font-black text-red-600">CGT AYUDA</h1>
             </div>
-
             <div className="flex items-center gap-2">
-              {deferredPrompt && (
-                <button 
-                  onClick={handleInstallClick} 
-                  className="bg-green-600 text-white text-[10px] font-black px-2.5 py-1.5 rounded-full shadow-md flex items-center gap-1 animate-pulse"
-                >
-                  <Download className="w-3.5 h-3.5" /> Instalar
-                </button>
-              )}
-
-              <button 
-                onClick={() => setShowNotificationModal(true)} 
-                className="relative p-1.5 rounded-full bg-gray-100 dark:bg-slate-800 text-gray-700 dark:text-slate-200"
-              >
+              <button aria-label="Abrir notificaciones" onClick={() => setShowNotificationModal(true)} className="relative p-1.5 rounded-full bg-gray-100 text-gray-700">
                 <Bell className="w-4 h-4" />
-                <span className="absolute -top-1 -right-1 bg-red-600 text-white text-[8px] font-black px-1 rounded-full">
-                  {isDia28OrLater ? '3' : '2'}
-                </span>
               </button>
-
-              <button onClick={toggleDarkMode} className={`flex items-center gap-1 px-2.5 py-1.5 rounded-full shadow-sm border text-[10px] font-black tracking-wide ${darkMode ? 'bg-slate-900 border-slate-700 text-amber-400' : 'bg-white border-gray-200 text-indigo-700'}`}>
-                 {darkMode ? <><Sun className="w-3.5 h-3.5 text-amber-400" /> MODO DÍA</> : <><Moon className="w-3.5 h-3.5 text-indigo-600" /> MODO OSCURO</>}
+              <button aria-label={darkMode ? "Cambiar a modo día" : "Cambiar a modo noche"} onClick={toggleDarkMode} className="flex items-center gap-1 px-2.5 py-1.5 rounded-full shadow-sm border bg-white border-gray-200 text-[10px] font-black">
+                {darkMode ? <Sun className="w-3.5 h-3.5 text-amber-500" /> : <Moon className="w-3.5 h-3.5 text-indigo-600" />}
               </button>
             </div>
           </div>
 
-          {/* BANNER DÍA 28 NÓMINA */}
-          {isDia28OrLater && (
-            <div className="bg-gradient-to-r from-red-700 via-red-800 to-amber-700 text-white py-2.5 px-4 shadow-md flex items-center justify-between no-print border-b border-red-900">
-              <div className="flex items-center gap-2 text-xs md:text-sm font-bold">
-                <Bell className="w-4 h-4 animate-bounce text-amber-300 shrink-0" />
-                <span>¡Aviso de Nóminas! Ya es día {new Date().getDate()}. Comprueba tus recibos del mes subidos a Iris FCC.</span>
-              </div>
-              <button onClick={() => setActiveTab('portal')} className="bg-white text-red-800 font-extrabold text-[10px] uppercase px-3 py-1 rounded-lg shadow hover:bg-red-50 shrink-0 ml-2">
-                Ir a Iris FCC
-              </button>
-            </div>
-          )}
-
-          {/* CONTENIDO INTERACTIVO DE LAS PESTAÑAS */}
-          <div className="px-4 md:px-8 max-w-md md:max-w-5xl mx-auto pb-48 md:pb-12 pt-4 md:pt-8 w-full print:p-0 print:max-w-none">
+          <div className="px-4 md:px-8 max-w-md md:max-w-5xl mx-auto pb-48 md:pb-12 pt-4 md:pt-8 w-full">
             {activeTab === 'inicio' && <PantallaInicio setActiveTab={setActiveTab} setActiveCalcSubTab={setActiveCalcSubTab} apiKey={apiKey} />}
             {activeTab === 'perfil' && <MiPerfil perfil={perfil} setPerfil={setPerfil} categorias={Object.keys(tablaSalarial2026)} />}
             {activeTab === 'cuadrante' && <MiCuadrante perfil={perfil} />}
-            
             {activeTab === 'calculadoras' && (
               <div className="space-y-6 w-full">
-                <div className="flex bg-white p-1.5 rounded-xl border border-gray-200 shadow-sm w-full md:max-w-md mx-auto md:mx-0 no-print">
-                  <button onClick={() => setActiveCalcSubTab('diferencias')} className={`flex-1 py-2.5 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${activeCalcSubTab === 'diferencias' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-950'}`}><Calculator className="w-4 h-4" /> Diferencias</button>
-                  <button onClick={() => setActiveCalcSubTab('horas_extras')} className={`flex-1 py-2.5 text-xs font-bold rounded-lg transition-all flex items-center justify-center gap-1.5 ${activeCalcSubTab === 'horas_extras' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500 hover:text-gray-950'}`}><Timer className="w-4 h-4" /> Horas Extras</button>
+                <div className="flex bg-white p-1.5 rounded-xl border border-gray-200 shadow-sm w-full md:max-w-md no-print">
+                  <button onClick={() => setActiveCalcSubTab('diferencias')} className={`flex-1 py-2.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 ${activeCalcSubTab === 'diferencias' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500'}`}><Calculator className="w-4 h-4" /> Diferencias</button>
+                  <button onClick={() => setActiveCalcSubTab('horas_extras')} className={`flex-1 py-2.5 text-xs font-bold rounded-lg flex items-center justify-center gap-1.5 ${activeCalcSubTab === 'horas_extras' ? 'bg-red-600 text-white shadow-sm' : 'text-gray-500'}`}><Timer className="w-4 h-4" /> Horas Extras</button>
                 </div>
                 {activeCalcSubTab === 'diferencias' ? <CalculadoraDiferencias perfil={perfil} voiceCalcData={voiceCalcData} apiKey={apiKey} onConfigureIA={() => setActiveTab('asistente')} /> : <CalculadoraHorasExtras perfil={perfil} apiKey={apiKey} onConfigureIA={() => setActiveTab('asistente')} />}
               </div>
             )}
-
             {activeTab === 'pagas' && <PagasExtrasPluses perfil={perfil} />}
             {activeTab === 'irpf' && <RetencionesIRPF apiKey={apiKey} onConfigureIA={() => setActiveTab('asistente')} />}
             {activeTab === 'auditoria' && <CalculadoraAuditoria apiKey={apiKey} onConfigureIA={() => setActiveTab('asistente')} voiceCommandToAudit={voiceCommandToAudit} />}
@@ -3189,21 +2869,37 @@ export default function App() {
             {activeTab === 'permisos' && <TablaPermisos />}
             {activeTab === 'videos' && <VideotecaSindical />}
             {activeTab === 'jubilacion' && <SimuladorJubilacion perfil={perfil} apiKey={apiKey} onConfigureIA={() => setActiveTab('asistente')} />}
-            {activeTab === 'asistente' && <AsistenteIA apiKey={apiKey} onSaveKey={(k) => { setApiKey(k); localStorage.setItem('cgt_gemini_api_key', k); }} onClearKey={() => { setApiKey(''); localStorage.removeItem('cgt_gemini_api_key'); }} />}
+            {activeTab === 'asistente' && (
+              <AsistenteIA
+                apiKey={apiKey}
+                onSaveKey={(k, soloSesion) => {
+                  setApiKey(k);
+                  if (soloSesion) {
+                    sessionStorage.setItem('cgt_gemini_api_key_session', k);
+                    localStorage.removeItem('cgt_gemini_api_key');
+                  } else {
+                    localStorage.setItem('cgt_gemini_api_key', k);
+                    sessionStorage.removeItem('cgt_gemini_api_key_session');
+                  }
+                }}
+                onClearKey={() => {
+                  setApiKey('');
+                  localStorage.removeItem('cgt_gemini_api_key');
+                  sessionStorage.removeItem('cgt_gemini_api_key_session');
+                }}
+              />
+            )}
           </div>
-
         </main>
 
         {/* RADIO CLARA MÓVIL */}
         <div className="md:hidden fixed bottom-[64px] left-0 w-full bg-orange-50 border-t border-orange-200 py-1.5 px-3 z-40 flex items-center justify-between shadow-md no-print">
-           <span className="text-[10px] font-black text-orange-800 uppercase tracking-widest flex items-center gap-1 whitespace-nowrap">
-             <Radio className="w-3.5 h-3.5 text-orange-600 animate-pulse" /> Radio Clara
-           </span>
-           <audio controls className="h-7 w-44 shadow-sm rounded" preload="none" src="https://cervera.eldialdigital.com:21111/stream">Audio no soportado.</audio>
+          <span className="text-[10px] font-black text-orange-800 uppercase flex items-center gap-1"><Radio className="w-3.5 h-3.5 text-orange-600 animate-pulse" /> Radio Clara</span>
+          <audio controls className="h-7 w-44 rounded" preload="none" src="https://cervera.eldialdigital.com:21111/stream">Audio no soportado.</audio>
         </div>
 
         {/* MENÚ NAVEGACIÓN MÓVIL INFERIOR */}
-        <nav className="md:hidden fixed bottom-0 left-0 w-full bg-white border-t border-gray-200 flex justify-around items-center h-[64px] z-50 shadow-[0_-4px_20px_rgba(0,0,0,0.08)] px-1 no-print" style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}>
+        <nav className="md:hidden fixed bottom-0 left-0 w-full bg-white border-t border-gray-200 flex justify-around items-center h-[64px] z-50 px-1 no-print">
           <BottomNavButton active={activeTab === 'inicio'} onClick={() => { setActiveTab('inicio'); setShowMobileMore(false); }} icon={<Home className="w-5 h-5" />} text="Inicio" />
           <BottomNavButton active={activeTab === 'perfil'} onClick={() => { setActiveTab('perfil'); setShowMobileMore(false); }} icon={<User className="w-5 h-5" />} text="Mi Perfil" />
           <BottomNavButton active={activeTab === 'cuadrante'} onClick={() => { setActiveTab('cuadrante'); setShowMobileMore(false); }} icon={<LayoutGrid className="w-5 h-5" />} text="Cuadrante" />
@@ -3216,13 +2912,14 @@ export default function App() {
           <div className="md:hidden fixed inset-0 bg-black/60 backdrop-blur-sm z-[60] flex items-end animate-fadeIn no-print" onClick={() => setShowMobileMore(false)}>
             <div className="bg-white w-full rounded-t-3xl p-6 space-y-4 shadow-2xl max-w-md mx-auto" onClick={(e) => e.stopPropagation()}>
               <div className="flex justify-between items-center border-b border-gray-100 pb-3">
-                <h3 className="font-bold text-gray-800 text-sm uppercase tracking-wider">Más Opciones</h3>
-                <button className="text-gray-400 font-bold hover:text-gray-600" onClick={() => setShowMobileMore(false)}>Cerrar</button>
+                <h3 className="font-bold text-gray-800 text-sm uppercase">Más Opciones</h3>
+                <button className="text-gray-400 font-bold" onClick={() => setShowMobileMore(false)}>Cerrar</button>
               </div>
-              <div className="grid grid-cols-1 gap-3 py-2 h-[65vh] overflow-y-auto pb-8 custom-scrollbar">
+              <div className="grid grid-cols-1 gap-3 py-2 h-[60vh] overflow-y-auto pb-8 custom-scrollbar">
                 <MobileMenuBtn onClick={() => { setActiveTab('afiliacion'); setShowMobileMore(false); }} icon={<Heart/>} title="Afíliate a CGT" desc="Formulario y ventajas sindicales" color="red" />
                 <MobileMenuBtn onClick={() => { setActiveTab('auditoria'); setShowMobileMore(false); }} icon={<FileSearch/>} title="Auditar Mi Nómina" desc="Análisis con IA de 2026" color="purple" />
-                <MobileMenuBtn onClick={() => { setActiveTab('permisos'); setShowMobileMore(false); }} icon={<Briefcase/>} title="Permisos y Licencias" desc="Días por ley y convenio" color="blue" />
+                <MobileMenuBtn onClick={() => { setActiveTab('permisos'); setShowMobileMore(false); }} icon={<Briefcase/>} title="Permisos y Licencias" desc="Asistente Mágico y 12 permisos" color="blue" />
+                <MobileMenuBtn onClick={() => { setActiveTab('jubilacion'); setShowMobileMore(false); }} icon={<Award/>} title="Simulador Jubilación" desc="Cálculo 2026 y Escáner IA" color="red" />
                 <MobileMenuBtn onClick={() => { setActiveTab('portal'); setShowMobileMore(false); }} icon={<ExternalLink/>} title="Portal del Empleado" desc="Nóminas e incidencias Servidek" color="red" />
                 <MobileMenuBtn onClick={() => { setActiveTab('pagas'); setShowMobileMore(false); }} icon={<Euro/>} title="Pagas y Pluses" desc="Pagas extras y plus fallas" color="green" />
                 <MobileMenuBtn onClick={() => { setActiveTab('irpf'); setShowMobileMore(false); }} icon={<Landmark/>} title="Retenciones IRPF, ETC" desc="Calculadora fiscal y Auditoría IA" color="blue" />
@@ -3230,30 +2927,25 @@ export default function App() {
                 <MobileMenuBtn onClick={() => { setActiveTab('buscador'); setShowMobileMore(false); }} icon={<BookOpen/>} title="Convenios y Buscador" desc="Boletines y descargas PDF" color="blue" />
                 <MobileMenuBtn onClick={() => { setActiveTab('videos'); setShowMobileMore(false); }} icon={<Play/>} title="Videoteca Sindical" desc="Buscador de videos" color="red" />
                 <MobileMenuBtn onClick={() => { setActiveTab('traductor'); setShowMobileMore(false); }} icon={<BookType/>} title="Traductor Legal IA" desc="Traduce convenios a lenguaje claro" color="purple" />
-                <MobileMenuBtn onClick={() => { setActiveTab('redactor'); setShowMobileMore(false); }} icon={<PenTool/>} title="Redactor Mágico IA" desc="Crea instancias y peticiones al instante" color="purple" />
-                <MobileMenuBtn onClick={() => { setActiveTab('jubilacion'); setShowMobileMore(false); }} icon={<Award/>} title="Simulador Jubilación" desc="¡NUEVA SECCIÓN 2026!" color="red" />
+                <MobileMenuBtn onClick={() => { setActiveTab('redactor'); setShowMobileMore(false); }} icon={<PenTool/>} title="Redactor Mágico IA" desc="Crea instancias y peticiones" color="purple" />
                 <MobileMenuBtn onClick={() => { setActiveTab('asistente'); setShowMobileMore(false); }} icon={<Bot/>} title="Asistente Sindical IA" desc="Chatea con nuestro bot" color="purple" />
               </div>
             </div>
           </div>
         )}
 
-        {/* MODAL CENTRO DE NOTIFICACIONES */}
         {showNotificationModal && <ModalNotificaciones onClose={() => setShowNotificationModal(false)} isDia28={isDia28OrLater} setActiveTab={setActiveTab} />}
 
-        {/* ASISTENTE DE VOZ FLOTANTE */}
         <AsistenteVozFlotante 
           apiKey={apiKey}
           categoriasDisponibles={Object.keys(tablaSalarial2026)}
           onExecuteAction={(actions, transcript) => {
             if (actions.targetTab) setActiveTab(actions.targetTab);
             if (actions.targetCalcSubTab) setActiveCalcSubTab(actions.targetCalcSubTab);
-            
             if (actions.iniciarAuditoria) {
               setActiveTab('auditoria');
               setVoiceCommandToAudit({ text: transcript, ts: Date.now() });
             }
-
             if (actions.categoriaBase || actions.categoriaSuperior || actions.diasSueltos !== null || actions.bivolante !== null || actions.porter !== null) {
               setVoiceCalcData({
                 categoriaBase: actions.categoriaBase,
@@ -3265,7 +2957,6 @@ export default function App() {
             }
           }}
         />
-
       </div>
     </div>
   );
